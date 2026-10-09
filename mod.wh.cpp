@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.6.1
+// @version         1.6.2
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -169,8 +169,8 @@ We love community contributions! To ensure high-quality updates, please follow t
       - '30': Hide after 30 seconds
       - '60': Hide after 60 seconds
   - AutoHideFullscreen: true
-    $name: Hide on full screen
-    $description: Automatically hide the island when playing a video or app in full screen mode.
+    $name: Hide on full screen video
+    $description: Hide the island completely while a video plays in full screen (YouTube, Netflix, VLC and other players). Games and other full-screen apps keep the island. Only volume changes and the mic/camera privacy dot still show over a full-screen video.
   - UnhideOnHover: true
     $name: Unhide on hover
     $description: Allow the hidden island to reappear when you hover your mouse over it.
@@ -1236,6 +1236,9 @@ struct FileTrayItem {
 struct SharedState {
     MediaSnapshot media;
     LyricsSnapshot lyrics;
+    // AUMIDs of every SMTC session currently playing (not just the one the
+    // pill follows), used to tell a full-screen video from a game.
+    std::vector<std::wstring> playingMediaSources;
     ClipboardSnapshot clipboard;
     NotificationSnapshot notification;
     VolumeSnapshot volume;
@@ -3518,6 +3521,134 @@ bool WindowLooksLikeMediaSource(HWND hwnd, const std::wstring& sourceLower) {
            (base.find(L"vlc") != std::wstring::npos && sourceLower.find(L"vlc") != std::wstring::npos);
 }
 
+// The packaged-app identity of a process (UWP Netflix, Media Player, ...), or
+// empty for a classic Win32 process. Resolved dynamically like the other
+// newer kernel32 exports.
+std::wstring PackagedAppIdForPid(DWORD pid) {
+    using GetApplicationUserModelId_t = LONG(WINAPI*)(HANDLE, UINT32*, PWSTR);
+    static auto pGetApplicationUserModelId = reinterpret_cast<GetApplicationUserModelId_t>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetApplicationUserModelId"));
+    if (!pGetApplicationUserModelId || !pid) {
+        return {};
+    }
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) {
+        return {};
+    }
+    wchar_t aumid[256] = {};
+    UINT32 length = ARRAYSIZE(aumid);
+    const LONG result = pGetApplicationUserModelId(process, &length, aumid);
+    CloseHandle(process);
+    return result == ERROR_SUCCESS ? std::wstring(aumid) : std::wstring();
+}
+
+// Firefox registers its SMTC session under a bare hex install hash
+// (e.g. "308046B0AF4A39CB") rather than anything containing "firefox".
+bool LooksLikeFirefoxAumid(const std::wstring& aumid) {
+    if (aumid.size() < 8) {
+        return false;
+    }
+    for (wchar_t ch : aumid) {
+        if (!iswxdigit(ch)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Whether `hwnd` is a window of the app that owns the SMTC session `aumid`.
+// UWP apps draw inside an ApplicationFrameHost frame, so their content process
+// is found through the frame's child windows.
+bool WindowBelongsToMediaSource(HWND hwnd, const std::wstring& aumid) {
+    if (!hwnd || aumid.empty()) {
+        return false;
+    }
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    std::wstring image;
+    if (!pid || !ProcessImageNameForPid(pid, &image)) {
+        return false;
+    }
+    std::wstring base = ToLowerCopy(BaseNameFromPath(image));
+
+    if (base == L"applicationframehost.exe") {
+        struct FindContent {
+            DWORD framePid;
+            DWORD contentPid;
+        } find = {pid, 0};
+        EnumChildWindows(hwnd, [](HWND child, LPARAM param) -> BOOL {
+            auto* f = reinterpret_cast<FindContent*>(param);
+            DWORD childPid = 0;
+            GetWindowThreadProcessId(child, &childPid);
+            if (childPid && childPid != f->framePid) {
+                f->contentPid = childPid;
+                return FALSE;
+            }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&find));
+        if (!find.contentPid) {
+            return false;
+        }
+        pid = find.contentPid;
+        image.clear();
+        ProcessImageNameForPid(pid, &image);
+        base = ToLowerCopy(BaseNameFromPath(image));
+    }
+
+    const std::wstring packaged = PackagedAppIdForPid(pid);
+    if (!packaged.empty() && _wcsicmp(packaged.c_str(), aumid.c_str()) == 0) {
+        return true;
+    }
+
+    if (base.empty()) {
+        return false;
+    }
+    const std::wstring aumidLower = ToLowerCopy(aumid);
+    const std::wstring stem = StripExtension(base);
+    if ((!stem.empty() && aumidLower.find(stem) != std::wstring::npos) ||
+        (base.find(L"chrome") != std::wstring::npos && aumidLower.find(L"chrome") != std::wstring::npos) ||
+        (base.find(L"msedge") != std::wstring::npos && aumidLower.find(L"edge") != std::wstring::npos) ||
+        (base.find(L"vlc") != std::wstring::npos && aumidLower.find(L"vlc") != std::wstring::npos)) {
+        return true;
+    }
+    return base == L"firefox.exe" && LooksLikeFirefoxAumid(aumid);
+}
+
+// "Hide on full screen" only applies to video: true when the foreground window
+// covers its monitor AND belongs to an app with a playing media session.
+// Games, a browser in F11 with nothing playing, etc. keep the island.
+//
+// Sticky per window: once a full-screen window has been seen playing, it stays
+// "video" while it remains full screen and in front, so pausing the video does
+// not pop the island over it. Render thread only (both callers live there).
+bool IsForegroundFullscreenVideo(HWND overlay) {
+    static HWND videoWindow = nullptr;
+    if (!IsForegroundFullscreen(overlay)) {
+        videoWindow = nullptr;
+        return false;
+    }
+
+    HWND fg = GetForegroundWindow();
+    if (fg && fg == videoWindow) {
+        return true;
+    }
+
+    std::vector<std::wstring> sources;
+    {
+        std::lock_guard lock(g_stateMutex);
+        sources = g_state.playingMediaSources;
+    }
+    for (const std::wstring& source : sources) {
+        if (WindowBelongsToMediaSource(fg, source)) {
+            videoWindow = fg;
+            return true;
+        }
+    }
+    videoWindow = nullptr;
+    return false;
+}
+
 // #62: short-form video feeds change "track" every few seconds, which turned
 // auto-expand into a constant popup. A blocklist entry is matched loosely
 // against the friendly source name, the raw AUMID and the title, so a single
@@ -4118,6 +4249,27 @@ DWORD WINAPI MediaThreadProc(void*) {
             if (g_settings.mediaAutoExpand) {
                 TriggerNudge();
             }
+        }
+
+        // Every playing session, not only the followed one, so a full-screen
+        // YouTube tab still counts as video while Spotify drives the pill.
+        std::vector<std::wstring> playingSources;
+        if (manager) {
+            try {
+                for (auto const& candidate : manager.GetSessions()) {
+                    try {
+                        if (candidate.GetPlaybackInfo().PlaybackStatus() == PlaybackStatus::Playing) {
+                            playingSources.emplace_back(candidate.SourceAppUserModelId().c_str());
+                        }
+                    } catch (...) {
+                    }
+                }
+            } catch (...) {
+            }
+        }
+        {
+            std::lock_guard lock(g_stateMutex);
+            g_state.playingMediaSources = std::move(playingSources);
         }
 
         WaitForSingleObject(g_stopEvent, 1500);
@@ -12893,9 +13045,13 @@ inline void NotifyMouseThreadParkedChanged() {
 std::atomic<int64_t> g_lastMouseWakeCheckMs = 0;
 
 LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    // Over a full-screen video the island stays gone however close the cursor
+    // gets; only the hotkey override brings it back.
     if (nCode == HC_ACTION && wParam == WM_MOUSEMOVE &&
         g_settings.unhideOnHover &&
-        g_autoHiddenParked.load(std::memory_order_relaxed)) {
+        g_autoHiddenParked.load(std::memory_order_relaxed) &&
+        !(g_isFullscreen.load(std::memory_order_relaxed) &&
+          !g_fullscreenOverrideVisible.load(std::memory_order_relaxed))) {
         const int64_t nowMs = static_cast<int64_t>(GetTickCount64());
         const int64_t last = g_lastMouseWakeCheckMs.load(std::memory_order_relaxed);
         if (nowMs - last >= 60) {  // ~16Hz check rate for responsive unhide
@@ -13822,7 +13978,7 @@ DWORD WINAPI RenderThreadProc(void*) {
                 if (parkedForFullscreen) {
                     MsgWaitForMultipleObjects(1, &g_stopEvent, FALSE, 1500, QS_ALLINPUT);
                     const bool stillFullscreen =
-                        g_settings.autoHideFullscreen && IsForegroundFullscreen(hwnd);
+                        g_settings.autoHideFullscreen && IsForegroundFullscreenVideo(hwnd);
                     g_isFullscreen.store(stillFullscreen, std::memory_order_relaxed);
                     if (!stillFullscreen) {
                         g_fullscreenOverrideVisible = false;
@@ -13932,10 +14088,37 @@ DWORD WINAPI RenderThreadProc(void*) {
             secondary = ActivityForKind(kinds[1], g_settings, snapshot);
         }
 
+        // "Full screen" here means full-screen *video* (IsForegroundFullscreenVideo);
+        // games and other full-screen apps leave the island alone. Checked
+        // before the inline alert because a video narrows which alerts may show.
+        static bool isFullscreen = false;
+        static double lastFullscreenCheck = -1.0;  // -1.0 guarantees the very first iteration checks
+        if (now - lastFullscreenCheck > 0.5) {
+            const bool newFullscreen = g_settings.autoHideFullscreen && IsForegroundFullscreenVideo(hwnd);
+            if (isFullscreen && !newFullscreen) {
+                // Fullscreen ended — re-arm so the next fullscreen session
+                // hides again even if the hotkey was used to reveal the
+                // island this time.
+                g_fullscreenOverrideVisible = false;
+            }
+            isFullscreen = newFullscreen;
+            g_isFullscreen.store(isFullscreen, std::memory_order_relaxed);
+            lastFullscreenCheck = now;
+        }
+        // Over a full-screen video the island is gone for good: no hover, no
+        // pin, no minimized line, no alerts -- except a volume change (the
+        // Windows OSD is suppressed, so this is the only feedback) and the
+        // privacy dot, both handled below.
+        const bool videoSuppressed =
+            isFullscreen && !g_fullscreenOverrideVisible.load(std::memory_order_relaxed);
+        const bool volumeAlertActive =
+            g_settings.volume && snapshot.volume.active && now < snapshot.volume.expiresAt;
+
         // Short alert drawn inside the media pill, if any (see ChooseInlineAlert).
-        const IslandKind inlineAlert = (primary.kind == IslandKind::Media)
-                                           ? ChooseInlineAlert(snapshot, g_settings, now)
-                                           : IslandKind::Idle;
+        const IslandKind inlineAlert =
+            (primary.kind != IslandKind::Media) ? IslandKind::Idle
+            : videoSuppressed ? (volumeAlertActive ? IslandKind::Volume : IslandKind::Idle)
+                              : ChooseInlineAlert(snapshot, g_settings, now);
         const bool hasInlineAlert = inlineAlert != IslandKind::Idle;
         renderer.SetInlineAlert(inlineAlert);
 
@@ -13987,6 +14170,10 @@ DWORD WINAPI RenderThreadProc(void*) {
             RECT dockRect = GetIslandDockRect();
             hover = PtInRect(&dockRect, cursor) != FALSE;
         }
+        if (videoSuppressed) {
+            // Nothing the cursor does may bring the island back over a video.
+            hover = false;
+        }
 
         bool needsRender = false;
 
@@ -14004,7 +14191,7 @@ DWORD WINAPI RenderThreadProc(void*) {
         // *title* change is transient now, so the pill behaves like the clipboard
         // and battery alerts -- it surfaces, then hides again while playback
         // continues in the background.
-        const bool recentTrackChange = g_settings.mediaAutoExpand &&
+        const bool recentTrackChange = g_settings.mediaAutoExpand && !videoSuppressed &&
                                        !MediaExpandBlocked(snapshot.media) &&
                                        primary.kind == IslandKind::Media &&
                                        snapshot.media.playing &&
@@ -14021,6 +14208,11 @@ DWORD WINAPI RenderThreadProc(void*) {
                                  primary.kind == IslandKind::DoNotDisturb ||
                                  hasInlineAlert ||
                                  recentTrackChange);
+        if (videoSuppressed) {
+            // Only a volume change gets through (the inline alert is already
+            // narrowed to volume above).
+            isTransientAlert = primary.kind == IslandKind::Volume || hasInlineAlert;
+        }
 
         const bool unhideGraceActive = (now < g_hotkeyUnhideUntil.load());
         const bool hoverUnhides = g_settings.unhideOnHover && hover;
@@ -14071,21 +14263,6 @@ DWORD WINAPI RenderThreadProc(void*) {
         // never takes it away (fullscreen suppression still does, below).
         if (minimizedMode) {
             isHidden = false;
-        }
-
-        static bool isFullscreen = false;
-        static double lastFullscreenCheck = -1.0;  // -1.0 guarantees the very first iteration checks
-        if (now - lastFullscreenCheck > 0.5) {
-            const bool newFullscreen = g_settings.autoHideFullscreen && IsForegroundFullscreen(hwnd);
-            if (isFullscreen && !newFullscreen) {
-                // Fullscreen ended — re-arm so the next fullscreen session
-                // hides again even if the hotkey was used to reveal the
-                // island this time.
-                g_fullscreenOverrideVisible = false;
-            }
-            isFullscreen = newFullscreen;
-            g_isFullscreen.store(isFullscreen, std::memory_order_relaxed);
-            lastFullscreenCheck = now;
         }
 
         // Reclaim the top of the z-order if another always-on-top window has
@@ -14180,9 +14357,12 @@ DWORD WINAPI RenderThreadProc(void*) {
         }
         renderer.SetMinimizedLine(minimizedLine);
 
-        const bool fullscreenSuppressed =
-            isFullscreen && !g_fullscreenOverrideVisible.load(std::memory_order_relaxed);
-        if ((isHidden || fullscreenSuppressed) && !privacyActive && !pinned && !isHoverExpanded && !isTransientAlert) {
+        const bool fullscreenSuppressed = videoSuppressed;
+        if (fullscreenSuppressed && !privacyActive && !isTransientAlert) {
+            primary.width = 0.0f;
+            primary.height = 0.0f;
+            secondary.reset();
+        } else if (isHidden && !privacyActive && !pinned && !isHoverExpanded && !isTransientAlert) {
             primary.width = 0.0f;
             primary.height = 0.0f;
             secondary.reset();
@@ -14524,8 +14704,8 @@ DWORD WINAPI RenderThreadProc(void*) {
         // Only parks once the collapse animation has actually settled at 0,
         // so the shrink still animates before we cut over to OS-hidden.
         const bool wantsAutoHiddenPark =
-            !g_manuallyHidden.load() && !pinned && !isHoverExpanded && !isTransientAlert &&
-            !privacyActive && (isHidden || fullscreenSuppressed) &&
+            !g_manuallyHidden.load() && !isTransientAlert && !privacyActive &&
+            (fullscreenSuppressed || (isHidden && !pinned && !isHoverExpanded)) &&
             widthSpring.value < 0.5f && heightSpring.value < 0.5f &&
             std::fabs(widthSpring.velocity) < 0.5f && std::fabs(heightSpring.velocity) < 0.5f;
 

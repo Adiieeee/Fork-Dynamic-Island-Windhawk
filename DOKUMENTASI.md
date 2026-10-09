@@ -2,7 +2,7 @@
 
 Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rusak (misalnya setelah update Windows), dokumen ini menjelaskan **perilaku yang seharusnya**, **di mana kodenya**, dan **API Windows apa yang dipakai**, supaya perbaikan bisa mengembalikan fungsi yang sama persis.
 
-- **Versi kode saat dokumen ditulis:** `1.6.1` (header `@version`), sekitar 14.900 baris.
+- **Versi kode saat dokumen ditulis:** `1.6.2` (header `@version`), sekitar 14.900 baris.
 - **Nomor baris** di bawah berlaku untuk versi ini dan akan bergeser saat kode berubah. **Selalu cari nama fungsinya** (misalnya `grep -n "DrawMinimizedLine" mod.wh.cpp`). Nama fungsi adalah acuan utama; nomor baris hanya petunjuk awal.
 - Konvensi umum proyek (proses tool-mod, threading, lokalisasi) juga diringkas di `CLAUDE.md`.
 
@@ -53,7 +53,7 @@ Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rus
 "/c/Program Files/Windhawk/Compiler/bin/clang++.exe" -fsyntax-only -Wall -std=c++23 \
   -target x86_64-w64-mingw32 -DWH_MOD -DUNICODE -D_UNICODE \
   -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
-  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.6.1"' \
+  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.6.2"' \
   -include windhawk_api.h -x c++ mod.wh.cpp
 ```
 
@@ -132,7 +132,7 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 1. **Proses pesan** (`PeekMessage`/`DispatchMessage`). `WM_APP_NEW_EVENT` memicu animasi "nudge" (pill sedikit memantul).
 2. **Park:**
    - Kalau `g_manuallyHidden`: window disembunyikan, lalu `MsgWaitForMultipleObjects(INFINITE)`, jadi CPU sekitar 0%.
-   - Kalau `g_autoHiddenParked` (auto-hide idle atau fullscreen): sama, dengan cek ulang fullscreen tiap 1,5 detik.
+   - Kalau `g_autoHiddenParked` (auto-hide idle atau fullscreen video): sama, dengan cek ulang `IsForegroundFullscreenVideo` tiap 1,5 detik.
 3. **Snapshot state** (copy `g_state` di bawah lock), lalu bersihkan notifikasi yang sudah kedaluwarsa.
 4. **Pilih aktivitas:**
    - `ChooseActivities` (±12699) memberi `primary` dan, opsional, `secondary` (dua pill berdampingan).
@@ -140,7 +140,7 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
    - `ChooseInlineAlert` (±12676) memilih notifikasi yang digambar **di dalam** pill musik (§8).
    - `g_activityTabVisible` = timer atau progress aktif (§10).
 5. **Hover:** rect pill dihitung dari `GetWindowRect`, ditambah padding saat mode minimize (§7). `isHoverExpanded` mengikuti setting Expand-on-hover (atau klik), dan dipaksa `hover` saat minimize.
-6. **Auto-hide / fullscreen:** `isHidden`, `IsForegroundFullscreen` (±1981, cek tiap 0,5 detik), dan `EnsureTopmost` (tiap 1 detik).
+6. **Auto-hide / fullscreen video:** `IsForegroundFullscreenVideo` (±3625) dicek tiap 0,5 detik **sebelum** `ChooseInlineAlert` (±14117), lalu menghasilkan `videoSuppressed` (±14112). Setelah itu `isHidden` dan `EnsureTopmost` (tiap 1 detik). Detail: §12 "Fullscreen video".
 7. **Poll sistem tiap 1 detik:** `UpdateSystemSnapshot` (±6124) membaca CPU, RAM, disk, dan level volume. GPU dan jaringan hanya dibaca kalau tab Hardware atau game overlay tampil.
 8. **Ukuran target:**
    - Idle: `MeasureIdleStrip`.
@@ -255,7 +255,7 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 - **Hover:** hitbox = garis + 4px ke samping + 4px ke bawah + sampai tepi layar, **tanpa jeda**. Hover selalu membuka card penuh, walaupun Expand-on-hover mati. Card terbuka dari tepi atas, dan menutup lagi saat mouse keluar card.
 - Island tetap di tepi selama minimize, juga saat terbuka, supaya tidak terjadi loop buka-tutup.
 - Notifikasi sesaat tetap memunculkan pill, lalu kembali jadi garis.
-- Garis tidak ikut auto-hide idle, tapi ikut tersembunyi saat aplikasi fullscreen.
+- Garis tidak ikut auto-hide idle, tapi ikut tersembunyi saat fullscreen video (hover pun tidak membukanya).
 - Tidak berlaku saat game overlay aktif.
 
 **Kode:**
@@ -386,7 +386,24 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
 - **Bentuk:** Pill (default), Windows 11 flyout (`w11Style`), macOS notch (`notchStyle`, menempel ke atas), `BorderMergedMode`.
 - **Tema:** `ThemePreset` (Obsidian, Graphite, Slate, Nord, Evergreen, Espresso, Plum, Porcelain, Custom), `ThemePalette` (±872), token warna di `EnsureBrushes`. Warna hex menerima `#RRGGBBAA`. Warna aksen diambil dari cover album (`sampledAccent`) dengan transisi halus.
 - **Backdrop:** namespace `Backdrop` (±2598): `SetWindowCompositionAttribute` (undocumented) untuk blur atau acrylic, dengan region dibatasi ke bentuk pill (`ApplyBackdropRegion` ±2860). Diterapkan lewat `WM_APP_APPLY_BACKDROP` (`ApplyBackdropMaterial` ±2641).
-- **Auto-hide:** `AutoHideIdleSeconds` (−1 = sembunyi kecuali ada notifikasi, 0 = tidak pernah, >0 = detik idle), `AutoHideFullscreen` (`IsForegroundFullscreen`), `UnhideOnHover` (hook mouse saat di-park). Park berarti `ShowWindow(SW_HIDE)` dan CPU sekitar 0%.
+- **Auto-hide:** `AutoHideIdleSeconds` (−1 = sembunyi kecuali ada notifikasi, 0 = tidak pernah, >0 = detik idle), `AutoHideFullscreen` (khusus video, lihat di bawah), `UnhideOnHover` (hook mouse saat di-park). Park berarti `ShowWindow(SW_HIDE)` dan CPU sekitar 0%.
+- **Fullscreen video (1.6.2):** island **hanya** hilang saat fullscreen **video**. Game, browser F11 tanpa video, dan aplikasi fullscreen lain tetap menampilkan island seperti biasa.
+  - `MediaThreadProc` (±4256) menyimpan AUMID **semua** sesi SMTC yang `Playing` ke `g_state.playingMediaSources` tiap 1,5 detik, bukan hanya sesi yang diikuti pill.
+  - `IsForegroundFullscreenVideo` (±3625) bernilai true kalau `IsForegroundFullscreen` (±1984: client rect jendela foreground menutupi monitornya) **dan** jendela itu milik salah satu sumber tersebut. Hasilnya sticky per HWND, jadi video yang di-pause tetap dianggap video sampai keluar fullscreen atau jendela foreground berganti.
+  - `WindowBelongsToMediaSource` (±3562) mencocokkan jendela dengan AUMID lewat tiga cara:
+    - (a) `GetApplicationUserModelId` (`PackagedAppIdForPid`) untuk aplikasi UWP. Frame `ApplicationFrameHost.exe` diganti dengan proses child-nya.
+    - (b) Nama exe tanpa `.exe` yang muncul di AUMID, plus alias chrome, edge, dan vlc.
+    - (c) Firefox: `firefox.exe` dengan AUMID berupa hash hex (`LooksLikeFirefoxAumid`).
+  - Saat `videoSuppressed`, island **benar-benar hilang**:
+    - `hover` dipaksa false.
+    - `recentTrackChange` dimatikan.
+    - `isTransientAlert` hanya untuk Volume.
+    - `inlineAlert` hanya Volume.
+    - Supresi tidak bisa dilewati oleh pin, hover, atau mode minimize.
+    - `LowLevelMouseProc` (±13047) tidak membangunkan island yang di-park.
+  - Yang masih boleh muncul hanya **volume** (OSD Windows disembunyikan, jadi ini satu-satunya umpan balik) dan **titik privasi**.
+  - Hotkey hide/show memaksa island tampil (`g_fullscreenOverrideVisible`). Status ini direset saat keluar dari fullscreen.
+  - `g_isFullscreen` / `isFullscreen` sekarang berarti "fullscreen video". Gate lain yang memakainya (game overlay, HW monitor, `EnsureTopmost`) otomatis tidak aktif di game fullscreen.
 - **Topmost:** `EnsureTopmost` (±2952) mengambil kembali posisi z-order tiap 1 detik. `AlwaysOnTop` mengatur parent ke Progman kalau mati.
 - **Click-through:** `SetClickThrough` (±6949) untuk idle tanpa hover, atau sementara saat Ctrl+hover (island menjadi tembus pandang).
 - **Hotkey hide/show:** `ApplyHideShowHotkey` (±2687) memanggil `RegisterHotKey` di thread window. Default Ctrl+Alt+D. Status disimpan di `ManuallyHidden`.
@@ -458,7 +475,9 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | Clipboard tidak muncul | `WM_CLIPBOARDUPDATE`, `CaptureClipboard` | `AddClipboardFormatListener` |
 | Blur/acrylic hilang atau kotak | `Backdrop` namespace, `ApplyBackdropRegion` | `SetWindowCompositionAttribute` (**undocumented**) |
 | Island tertutup window lain | `EnsureTopmost`, `PositionOverlayWindow` | z-order `HWND_TOPMOST` |
-| Fullscreen auto-hide salah | `IsForegroundFullscreen` | perbandingan rect monitor dan class window |
+| Fullscreen auto-hide salah (deteksi fullscreen) | `IsForegroundFullscreen` | perbandingan rect monitor dan class window |
+| Video fullscreen tidak menyembunyikan island / game ikut tersembunyi | `IsForegroundFullscreenVideo`, `WindowBelongsToMediaSource`, `playingMediaSources` di `MediaThreadProc` | format AUMID SMTC per browser/aplikasi, `GetApplicationUserModelId`, `ApplicationFrameHost` |
+| Island muncul saat hover di atas video fullscreen | `videoSuppressed` di render loop, `LowLevelMouseProc` | — |
 | Hardware monitor 0/kosong | `GetGpuUsage`, `GetNetworkUsage` | PDH counter berbahasa Inggris (`PdhAddEnglishCounterW`) |
 | Posisi salah di multi-monitor | `GetAnchorWorkRect`, `MonitorEnumProc` | `EnumDisplayMonitors`, DPI |
 
@@ -478,6 +497,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | 1.4.0 | **Lirik LRCLIB** di pill collapsed (+ toggle, cache, retry); pembacaan cover bertahap; **cover cadangan iTunes**; `HttpGet` aman untuk biner + timeout; lebar pill dinamis mengikuti lirik (lead 0,35 detik, jeda ≥ 4 detik kembali normal); setting **Lyrics delay (ms)** |
 | 1.5.0 | **Minimize**: garis glass + waveform, menempel 3px dari tepi layar, hitbox kecil tanpa jeda, hover membuka card |
 | 1.6.0 | **Notifikasi inline** di tengah pill musik (tanpa pill kedua, lebar mengikuti notifikasi, maks 460); **tab Aktivitas** untuk Timer/Progress; durasi notifikasi sesaat maksimal 3 detik |
+| 1.6.2 | **Auto-hide fullscreen khusus video** (game dan fullscreen lain tetap menampilkan island); saat video island benar-benar hilang (hover/pin/minimize tidak membukanya), hanya volume dan privasi yang muncul; pause tetap tersembunyi (sticky) |
 | 1.6.1 | **Volume instan** (callback Core Audio, bukan poll 1 detik); **OSD volume Windows disembunyikan** selama mod aktif (hook menelan `VK_VOLUME_*`) + log diagnostik |
 
 File backup tiap tahap disimpan sementara di folder scratchpad sesi Claude Code (`mod.wh.cpp.bak`, `.before-minimize.bak`, `.before-inline-alerts.bak`, `.before-volume.bak`). Folder itu bukan lokasi permanen, jadi gunakan git untuk riwayat jangka panjang.
