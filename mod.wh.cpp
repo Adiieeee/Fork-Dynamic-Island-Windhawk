@@ -169,8 +169,8 @@ We love community contributions! To ensure high-quality updates, please follow t
       - '30': Hide after 30 seconds
       - '60': Hide after 60 seconds
   - AutoHideFullscreen: true
-    $name: Hide on full screen video
-    $description: Hide the island completely while a video plays in full screen (YouTube, Netflix, VLC and other players). Games and other full-screen apps keep the island. Only volume changes and the mic/camera privacy dot still show over a full-screen video.
+    $name: Minimize on full screen video
+    $description: While a video plays in full screen (YouTube, Netflix, VLC and other players) the island shrinks to the thin minimized line at the top edge and does not open on hover. Games and other full-screen apps keep the normal island. Only volume changes and the mic/camera privacy dot still surface over a full-screen video. The Windhawk log names any full-screen window that was not recognised as video.
   - UnhideOnHover: true
     $name: Unhide on hover
     $description: Allow the hidden island to reappear when you hover your mouse over it.
@@ -3576,12 +3576,38 @@ BOOL CALLBACK FindFrameContentProc(HWND child, LPARAM param) {
     return TRUE;
 }
 
+// The AUMID a window declares for itself (PKEY_AppUserModel_ID). Chromium
+// browsers tag their windows with the same id they register with SMTC, so this
+// is the most direct window <-> media session link for them. Empty if unset.
+std::wstring WindowAppId(HWND hwnd) {
+    static const PROPERTYKEY kAppUserModelIdKey = {
+        {0x9F4C2855, 0x9F79, 0x4B39, {0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3}}, 5};
+    std::wstring result;
+    IPropertyStore* store = nullptr;
+    if (SUCCEEDED(SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(&store))) && store) {
+        PROPVARIANT value;
+        PropVariantInit(&value);
+        if (SUCCEEDED(store->GetValue(kAppUserModelIdKey, &value)) &&
+            value.vt == VT_LPWSTR && value.pwszVal) {
+            result = value.pwszVal;
+        }
+        PropVariantClear(&value);
+        store->Release();
+    }
+    return result;
+}
+
 // Whether `hwnd` is a window of the app that owns the SMTC session `aumid`.
 // UWP apps draw inside an ApplicationFrameHost frame, so their content process
 // is found through the frame's child windows.
 bool WindowBelongsToMediaSource(HWND hwnd, const std::wstring& aumid) {
     if (!hwnd || aumid.empty()) {
         return false;
+    }
+
+    const std::wstring windowAppId = WindowAppId(hwnd);
+    if (!windowAppId.empty() && _wcsicmp(windowAppId.c_str(), aumid.c_str()) == 0) {
+        return true;
     }
 
     DWORD pid = 0;
@@ -3650,10 +3676,35 @@ bool IsForegroundFullscreenVideo(HWND overlay) {
     for (const std::wstring& source : sources) {
         if (WindowBelongsToMediaSource(fg, source)) {
             videoWindow = fg;
+            Wh_Log(L"Full-screen video detected (source \"%s\")", source.c_str());
             return true;
         }
     }
     videoWindow = nullptr;
+
+    // Diagnostics for a full-screen window that was NOT recognised as video:
+    // logged once per window + playing-source set, so a browser or player whose
+    // ids do not line up can be matched up from the Windhawk log.
+    static HWND loggedWindow = nullptr;
+    static std::wstring loggedSources;
+    std::wstring joined;
+    for (const std::wstring& source : sources) {
+        if (!joined.empty()) {
+            joined += L" | ";
+        }
+        joined += source;
+    }
+    if (fg != loggedWindow || joined != loggedSources) {
+        loggedWindow = fg;
+        loggedSources = joined;
+        std::wstring image;
+        ProcessImageNameForWindow(fg, &image);
+        DWORD pid = 0;
+        GetWindowThreadProcessId(fg, &pid);
+        Wh_Log(L"Full screen, not video: exe=\"%s\" windowAppId=\"%s\" packagedId=\"%s\" playing=[%s]",
+               BaseNameFromPath(image).c_str(), WindowAppId(fg).c_str(),
+               PackagedAppIdForPid(pid).c_str(), joined.c_str());
+    }
     return false;
 }
 
@@ -7885,8 +7936,7 @@ class Renderer {
         // card, where DrawPill would be laying out art and text in a shape only
         // a few pixels tall.
         const bool drawMinimizedLine =
-            minimizedLine_ ||
-            (g_islandMinimized.load(std::memory_order_relaxed) && height < 24.0f * settings.sizeScale);
+            minimizedLine_ || (lineMode_ && height < 24.0f * settings.sizeScale);
 
         if (width >= 2.0f && height >= 2.0f && drawMinimizedLine) {
             DrawMinimizedLine(state, settings, D2D1::RectF(left, top, left + width, top + height));
@@ -7934,6 +7984,13 @@ class Renderer {
     }
 
     // Set by the render loop each frame, before Render().
+    // Whether the island currently rests as the line (minimized, or over a
+    // full-screen video), so the spring's tiny in-between heights draw the
+    // line rather than a squashed pill.
+    void SetLineMode(bool lineMode) {
+        lineMode_ = lineMode;
+    }
+
     void SetMinimizedLine(bool minimizedLine) {
         minimizedLine_ = minimizedLine;
     }
@@ -12748,6 +12805,7 @@ class Renderer {
     double       lastAccentTime_ = -1.0;  // -1 = not yet set (will snap on first frame)
     float        mediaBtnPress_[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};  // prev, play, next, lyrics, minimize
     bool         minimizedLine_ = false;  // set per frame by the render loop
+    bool         lineMode_ = false;       // set per frame by the render loop
     IslandKind   inlineAlert_ = IslandKind::Idle;  // set per frame by the render loop
     double       lastMediaBtnTime_ = -1.0;
 };
@@ -14113,10 +14171,10 @@ DWORD WINAPI RenderThreadProc(void*) {
             g_isFullscreen.store(isFullscreen, std::memory_order_relaxed);
             lastFullscreenCheck = now;
         }
-        // Over a full-screen video the island is gone for good: no hover, no
-        // pin, no minimized line, no alerts -- except a volume change (the
-        // Windows OSD is suppressed, so this is the only feedback) and the
-        // privacy dot, both handled below.
+        // Over a full-screen video the island shrinks to the minimized line at
+        // the screen edge and stays there: hover and pin cannot open it and no
+        // alerts surface -- except a volume change (the Windows OSD is
+        // suppressed, so this is the only feedback) and the privacy dot.
         const bool videoSuppressed =
             isFullscreen && !g_fullscreenOverrideVisible.load(std::memory_order_relaxed);
         const bool volumeAlertActive =
@@ -14277,7 +14335,9 @@ DWORD WINAPI RenderThreadProc(void*) {
         // been raised over the island. Cheap and rate-limited, and skipped
         // while the island is hidden or suppressed so it cannot un-hide itself.
         static double lastTopmostCheck = 0.0;
-        if (!isFullscreen && !g_manuallyHidden.load() && !g_autoHiddenParked.load() &&
+        // Runs over a full-screen video too: the minimized line has to stay
+        // above the player window.
+        if (!g_manuallyHidden.load() && !g_autoHiddenParked.load() &&
             now - lastTopmostCheck > 1.0) {
             EnsureTopmost(hwnd);
             lastTopmostCheck = now;
@@ -14357,20 +14417,18 @@ DWORD WINAPI RenderThreadProc(void*) {
         // Minimized and nothing asking for attention: rest as the thin line.
         // Transient alerts still surface at their normal size, then the island
         // springs back down to the line once they expire.
-        const bool minimizedLine = minimizedMode && !isHoverExpanded && !pinned && !isTransientAlert;
+        const bool videoLine = videoSuppressed && !isTransientAlert && !privacyActive;
+        const bool minimizedLine =
+            videoLine || (minimizedMode && !isHoverExpanded && !pinned && !isTransientAlert);
         if (minimizedLine) {
             primary.width = MediaLayout::kMinimizedLineWidth * g_settings.sizeScale;
             primary.height = MediaLayout::kMinimizedLineHeight * g_settings.sizeScale;
             secondary.reset();
         }
         renderer.SetMinimizedLine(minimizedLine);
+        renderer.SetLineMode(minimizedMode || videoSuppressed);
 
-        const bool fullscreenSuppressed = videoSuppressed;
-        if (fullscreenSuppressed && !privacyActive && !isTransientAlert) {
-            primary.width = 0.0f;
-            primary.height = 0.0f;
-            secondary.reset();
-        } else if (isHidden && !privacyActive && !pinned && !isHoverExpanded && !isTransientAlert) {
+        if (isHidden && !privacyActive && !pinned && !isHoverExpanded && !isTransientAlert) {
             primary.width = 0.0f;
             primary.height = 0.0f;
             secondary.reset();
@@ -14451,7 +14509,7 @@ DWORD WINAPI RenderThreadProc(void*) {
 
         nudgeSpring.Step(dt * speed, 280.0f * styleStiffnessMult, 24.0f * styleDampingMult);
 
-        edgeSpring.target = minimizedMode ? 1.0f : 0.0f;
+        edgeSpring.target = (minimizedMode || videoSuppressed) ? 1.0f : 0.0f;
         if (std::fabs(edgeSpring.target - edgeSpring.value) > 0.001f || std::fabs(edgeSpring.velocity) > 0.001f) {
             // Critically damped so the window glides without overshooting past
             // the screen edge.
@@ -14713,12 +14771,12 @@ DWORD WINAPI RenderThreadProc(void*) {
         // so the shrink still animates before we cut over to OS-hidden.
         const bool wantsAutoHiddenPark =
             !g_manuallyHidden.load() && !isTransientAlert && !privacyActive &&
-            (fullscreenSuppressed || (isHidden && !pinned && !isHoverExpanded)) &&
+            isHidden && !pinned && !isHoverExpanded &&
             widthSpring.value < 0.5f && heightSpring.value < 0.5f &&
             std::fabs(widthSpring.velocity) < 0.5f && std::fabs(heightSpring.velocity) < 0.5f;
 
         if (wantsAutoHiddenPark) {
-            parkedForFullscreen = fullscreenSuppressed;
+            parkedForFullscreen = false;
             wasAutoHiddenParked = true;
             g_autoHiddenParked = true;
             ShowWindow(hwnd, SW_HIDE);

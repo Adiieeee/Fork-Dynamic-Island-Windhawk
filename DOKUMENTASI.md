@@ -132,7 +132,7 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 1. **Proses pesan** (`PeekMessage`/`DispatchMessage`). `WM_APP_NEW_EVENT` memicu animasi "nudge" (pill sedikit memantul).
 2. **Park:**
    - Kalau `g_manuallyHidden`: window disembunyikan, lalu `MsgWaitForMultipleObjects(INFINITE)`, jadi CPU sekitar 0%.
-   - Kalau `g_autoHiddenParked` (auto-hide idle atau fullscreen video): sama, dengan cek ulang `IsForegroundFullscreenVideo` tiap 1,5 detik.
+   - Kalau `g_autoHiddenParked` (auto-hide idle): sama. (Sejak 1.6.2 fullscreen video tidak lagi mem-park island, tapi menjadikannya garis.)
 3. **Snapshot state** (copy `g_state` di bawah lock), lalu bersihkan notifikasi yang sudah kedaluwarsa.
 4. **Pilih aktivitas:**
    - `ChooseActivities` (±12699) memberi `primary` dan, opsional, `secondary` (dua pill berdampingan).
@@ -140,7 +140,7 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
    - `ChooseInlineAlert` (±12676) memilih notifikasi yang digambar **di dalam** pill musik (§8).
    - `g_activityTabVisible` = timer atau progress aktif (§10).
 5. **Hover:** rect pill dihitung dari `GetWindowRect`, ditambah padding saat mode minimize (§7). `isHoverExpanded` mengikuti setting Expand-on-hover (atau klik), dan dipaksa `hover` saat minimize.
-6. **Auto-hide / fullscreen video:** `IsForegroundFullscreenVideo` (±3633) dicek tiap 0,5 detik **sebelum** `ChooseInlineAlert` (±14125), lalu menghasilkan `videoSuppressed` (±14120). Setelah itu `isHidden` dan `EnsureTopmost` (tiap 1 detik). Detail: §12 "Fullscreen video".
+6. **Auto-hide / fullscreen video:** `IsForegroundFullscreenVideo` (±3659) dicek tiap 0,5 detik **sebelum** `ChooseInlineAlert` (±14183), lalu menghasilkan `videoSuppressed` (±14178). Saat video, island menjadi garis minimize. Setelah itu `isHidden` dan `EnsureTopmost` (tiap 1 detik). Detail: §12 "Fullscreen video".
 7. **Poll sistem tiap 1 detik:** `UpdateSystemSnapshot` (±6124) membaca CPU, RAM, disk, dan level volume. GPU dan jaringan hanya dibaca kalau tab Hardware atau game overlay tampil.
 8. **Ukuran target:**
    - Idle: `MeasureIdleStrip`.
@@ -255,7 +255,7 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 - **Hover:** hitbox = garis + 4px ke samping + 4px ke bawah + sampai tepi layar, **tanpa jeda**. Hover selalu membuka card penuh, walaupun Expand-on-hover mati. Card terbuka dari tepi atas, dan menutup lagi saat mouse keluar card.
 - Island tetap di tepi selama minimize, juga saat terbuka, supaya tidak terjadi loop buka-tutup.
 - Notifikasi sesaat tetap memunculkan pill, lalu kembali jadi garis.
-- Garis tidak ikut auto-hide idle, tapi ikut tersembunyi saat fullscreen video (hover pun tidak membukanya).
+- Garis tidak ikut auto-hide idle. Saat fullscreen video, island juga otomatis menjadi garis ini (§12), tapi hover tidak membukanya.
 - Tidak berlaku saat game overlay aktif.
 
 **Kode:**
@@ -387,23 +387,29 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
 - **Tema:** `ThemePreset` (Obsidian, Graphite, Slate, Nord, Evergreen, Espresso, Plum, Porcelain, Custom), `ThemePalette` (±872), token warna di `EnsureBrushes`. Warna hex menerima `#RRGGBBAA`. Warna aksen diambil dari cover album (`sampledAccent`) dengan transisi halus.
 - **Backdrop:** namespace `Backdrop` (±2598): `SetWindowCompositionAttribute` (undocumented) untuk blur atau acrylic, dengan region dibatasi ke bentuk pill (`ApplyBackdropRegion` ±2860). Diterapkan lewat `WM_APP_APPLY_BACKDROP` (`ApplyBackdropMaterial` ±2641).
 - **Auto-hide:** `AutoHideIdleSeconds` (−1 = sembunyi kecuali ada notifikasi, 0 = tidak pernah, >0 = detik idle), `AutoHideFullscreen` (khusus video, lihat di bawah), `UnhideOnHover` (hook mouse saat di-park). Park berarti `ShowWindow(SW_HIDE)` dan CPU sekitar 0%.
-- **Fullscreen video (1.6.2):** island **hanya** hilang saat fullscreen **video**. Game, browser F11 tanpa video, dan aplikasi fullscreen lain tetap menampilkan island seperti biasa.
-  - `MediaThreadProc` (±4264) menyimpan AUMID **semua** sesi SMTC yang `Playing` ke `g_state.playingMediaSources` tiap 1,5 detik, bukan hanya sesi yang diikuti pill.
-  - `IsForegroundFullscreenVideo` (±3633) bernilai true kalau `IsForegroundFullscreen` (±1984: client rect jendela foreground menutupi monitornya) **dan** jendela itu milik salah satu sumber tersebut. Hasilnya sticky per HWND, jadi video yang di-pause tetap dianggap video sampai keluar fullscreen atau jendela foreground berganti.
-  - `WindowBelongsToMediaSource` (±3582) mencocokkan jendela dengan AUMID lewat tiga cara:
-    - (a) `GetApplicationUserModelId` (`PackagedAppIdForPid`) untuk aplikasi UWP. Frame `ApplicationFrameHost.exe` diganti dengan proses child-nya.
-    - (b) Nama exe tanpa `.exe` yang muncul di AUMID, plus alias chrome, edge, dan vlc.
-    - (c) Firefox: `firefox.exe` dengan AUMID berupa hash hex (`LooksLikeFirefoxAumid`).
-  - Saat `videoSuppressed`, island **benar-benar hilang**:
-    - `hover` dipaksa false.
-    - `recentTrackChange` dimatikan.
-    - `isTransientAlert` hanya untuk Volume.
-    - `inlineAlert` hanya Volume.
-    - Supresi tidak bisa dilewati oleh pin, hover, atau mode minimize.
-    - `LowLevelMouseProc` (±13055) tidak membangunkan island yang di-park.
-  - Yang masih boleh muncul hanya **volume** (OSD Windows disembunyikan, jadi ini satu-satunya umpan balik) dan **titik privasi**.
-  - Hotkey hide/show memaksa island tampil (`g_fullscreenOverrideVisible`). Status ini direset saat keluar dari fullscreen.
-  - `g_isFullscreen` / `isFullscreen` sekarang berarti "fullscreen video". Gate lain yang memakainya (game overlay, HW monitor, `EnsureTopmost`) otomatis tidak aktif di game fullscreen.
+- **Fullscreen video (1.6.2):** saat fullscreen **video**, island **mengecil menjadi garis minimize** di tepi atas layar. Game, browser F11 tanpa video, dan aplikasi fullscreen lain tetap menampilkan island normal.
+  - **Deteksi:**
+    - `MediaThreadProc` menyimpan AUMID **semua** sesi SMTC yang `Playing` ke `g_state.playingMediaSources` tiap 1,5 detik, bukan hanya sesi yang diikuti pill.
+    - `IsForegroundFullscreenVideo` bernilai true kalau `IsForegroundFullscreen` true (client rect jendela foreground menutupi monitornya) **dan** jendela itu milik salah satu sumber tersebut. Hasilnya sticky per HWND, jadi video yang di-pause tetap dianggap video sampai keluar dari fullscreen atau foreground berganti.
+  - **Pencocokan** `WindowBelongsToMediaSource`, berurutan:
+    - (a) `WindowAppId`: properti `PKEY_AppUserModel_ID` jendela lewat `SHGetPropertyStoreForWindow`. Browser Chromium memakai id yang sama dengan SMTC.
+    - (b) `PackagedAppIdForPid` (`GetApplicationUserModelId`) untuk aplikasi UWP. Frame `ApplicationFrameHost.exe` diganti proses child-nya lewat `FindFrameContentProc`, yang harus berupa fungsi `CALLBACK`, bukan lambda, karena build x86 butuh stdcall.
+    - (c) Nama exe tanpa `.exe` yang muncul di AUMID, plus alias chrome, edge, dan vlc.
+    - (d) Firefox: AUMID berupa hash hex (`LooksLikeFirefoxAumid`).
+  - **Log diagnostik:**
+    - `Full-screen video detected (source "...")` muncul saat terdeteksi.
+    - `Full screen, not video: exe=... windowAppId=... packagedId=... playing=[...]` muncul sekali per jendela dan set sumber saat **tidak** cocok. Pakai log ini untuk menambah aturan pencocokan.
+  - **Perilaku saat `videoSuppressed`** (render loop):
+    - `videoLine` memaksa `minimizedLine`.
+    - `edgeSpring` menggeser island ke tepi seperti mode minimize.
+    - `renderer.SetLineMode` memastikan transisi tetap digambar sebagai garis.
+    - `hover` dipaksa false, jadi garis tidak terbuka saat di-hover. Pin juga diabaikan.
+    - `recentTrackChange` dimatikan, dan `inlineAlert` / `isTransientAlert` hanya untuk Volume.
+    - Volume muncul sebagai pill sebentar lalu kembali menjadi garis. Titik privasi menampilkan pill collapsed.
+    - Auto-hide idle tetap berlaku untuk garis ini, tidak seperti mode minimize manual.
+    - `EnsureTopmost` tetap berjalan supaya garis berada di atas player.
+  - Hotkey hide/show memaksa island normal (`g_fullscreenOverrideVisible`). Status ini direset saat keluar dari fullscreen.
+  - `g_isFullscreen` / `isFullscreen` berarti "fullscreen video". Gate lain yang memakainya (game overlay, HW monitor) otomatis tidak aktif di game fullscreen. `parkedForFullscreen` sekarang selalu false (island tidak lagi di-park saat video).
 - **Topmost:** `EnsureTopmost` (±2952) mengambil kembali posisi z-order tiap 1 detik. `AlwaysOnTop` mengatur parent ke Progman kalau mati.
 - **Click-through:** `SetClickThrough` (±6949) untuk idle tanpa hover, atau sementara saat Ctrl+hover (island menjadi tembus pandang).
 - **Hotkey hide/show:** `ApplyHideShowHotkey` (±2687) memanggil `RegisterHotKey` di thread window. Default Ctrl+Alt+D. Status disimpan di `ManuallyHidden`.
@@ -477,7 +483,8 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | Island tertutup window lain | `EnsureTopmost`, `PositionOverlayWindow` | z-order `HWND_TOPMOST` |
 | Fullscreen auto-hide salah (deteksi fullscreen) | `IsForegroundFullscreen` | perbandingan rect monitor dan class window |
 | Video fullscreen tidak menyembunyikan island / game ikut tersembunyi | `IsForegroundFullscreenVideo`, `WindowBelongsToMediaSource`, `playingMediaSources` di `MediaThreadProc` | format AUMID SMTC per browser/aplikasi, `GetApplicationUserModelId`, `ApplicationFrameHost` |
-| Island muncul saat hover di atas video fullscreen | `videoSuppressed` di render loop, `LowLevelMouseProc` | — |
+| Garis terbuka saat hover di atas video fullscreen / island tidak menjadi garis | `videoSuppressed`, `videoLine`, `edgeSpring` di render loop | — |
+| Video tertentu tidak terdeteksi | baca log `Full screen, not video:` lalu tambah aturan di `WindowBelongsToMediaSource` | AUMID SMTC vs `PKEY_AppUserModel_ID` |
 | Hardware monitor 0/kosong | `GetGpuUsage`, `GetNetworkUsage` | PDH counter berbahasa Inggris (`PdhAddEnglishCounterW`) |
 | Posisi salah di multi-monitor | `GetAnchorWorkRect`, `MonitorEnumProc` | `EnumDisplayMonitors`, DPI |
 
@@ -497,7 +504,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | 1.4.0 | **Lirik LRCLIB** di pill collapsed (+ toggle, cache, retry); pembacaan cover bertahap; **cover cadangan iTunes**; `HttpGet` aman untuk biner + timeout; lebar pill dinamis mengikuti lirik (lead 0,35 detik, jeda ≥ 4 detik kembali normal); setting **Lyrics delay (ms)** |
 | 1.5.0 | **Minimize**: garis glass + waveform, menempel 3px dari tepi layar, hitbox kecil tanpa jeda, hover membuka card |
 | 1.6.0 | **Notifikasi inline** di tengah pill musik (tanpa pill kedua, lebar mengikuti notifikasi, maks 460); **tab Aktivitas** untuk Timer/Progress; durasi notifikasi sesaat maksimal 3 detik |
-| 1.6.2 | **Auto-hide fullscreen khusus video** (game dan fullscreen lain tetap menampilkan island); saat video island benar-benar hilang (hover/pin/minimize tidak membukanya), hanya volume dan privasi yang muncul; pause tetap tersembunyi (sticky) |
+| 1.6.2 | **Fullscreen video menjadi garis minimize** (bukan hilang); game dan fullscreen lain tidak terpengaruh; hover/pin tidak membukanya; hanya volume dan privasi yang muncul; pause tetap jadi garis (sticky); deteksi lewat AUMID jendela + log diagnostik |
 | 1.6.1 | **Volume instan** (callback Core Audio, bukan poll 1 detik); **OSD volume Windows disembunyikan** selama mod aktif (hook menelan `VK_VOLUME_*`) + log diagnostik |
 
 File backup tiap tahap disimpan sementara di folder scratchpad sesi Claude Code (`mod.wh.cpp.bak`, `.before-minimize.bak`, `.before-inline-alerts.bak`, `.before-volume.bak`). Folder itu bukan lokasi permanen, jadi gunakan git untuk riwayat jangka panjang.
