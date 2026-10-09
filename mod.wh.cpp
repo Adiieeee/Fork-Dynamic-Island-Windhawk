@@ -603,6 +603,9 @@ namespace MediaLayout {
     constexpr float kMinimizedLineHeight = 8.0f;
     constexpr float kMinimizedHoverPadX = 40.0f;
     constexpr float kMinimizedHoverPadBelow = 16.0f;
+    // The line tucks up against the screen edge (the bottom edge for the
+    // bottom positions), leaving just this gap.
+    constexpr float kMinimizedLineEdgeGap = 3.0f;
 
     // Collapsed pill width, without and with a lyric line between the art and
     // the waveform. ActivityForKind picks one; the width spring animates it.
@@ -1311,6 +1314,10 @@ std::atomic<int> g_lyricsDelayMs = 0;
 // Minimize toggle (button left of "previous"): the island rests as a thin line
 // and opens on hover. Persisted with Wh_SetIntValue(L"IslandMinimized").
 std::atomic<bool> g_islandMinimized = false;
+// 0..1, how far the island has moved from its normal spot to the screen edge
+// for the minimized line. Animated by a spring in RenderThreadProc and applied
+// by PositionOverlayWindow.
+std::atomic<float> g_minimizedEdgeFraction = 0.0f;
 std::atomic<bool> g_running = false;
 std::atomic<int> g_idleTab = 0;
 std::atomic<bool> g_layoutDirty = true;
@@ -2783,6 +2790,27 @@ void PositionOverlayWindow(HWND hwnd, int width, int height) {
 
     x += g_settings.offsetX;
     y += ResolveOffsetY(static_cast<float>(height));
+
+    // Minimized line: slide toward the nearest screen edge so the line sits a
+    // few pixels from it, eased by g_minimizedEdgeFraction. The window may end
+    // up partly above the work area, which only clips its transparent padding.
+    const float edgeFraction = Clamp(g_minimizedEdgeFraction.load(std::memory_order_relaxed), 0.0f, 1.0f);
+    if (edgeFraction > 0.0f) {
+        const float gap = MediaLayout::kMinimizedLineEdgeGap * g_settings.sizeScale;
+        const bool bottomAnchored = g_settings.position == Position::BottomCenter ||
+                                    g_settings.position == Position::BottomLeft ||
+                                    g_settings.position == Position::BottomRight;
+        float shift = 0.0f;
+        if (bottomAnchored) {
+            const float pillBottom = static_cast<float>(y + height) - kRenderPadY;
+            shift = (static_cast<float>(work.bottom) - gap) - pillBottom;
+        } else {
+            const float pillTop = static_cast<float>(y) + (flushTop ? 0.0f : kRenderPadY);
+            shift = (static_cast<float>(work.top) + gap) - pillTop;
+        }
+        y += static_cast<int>(std::lround(shift * edgeFraction));
+    }
+
     SetWindowPos(hwnd, zOrder, x, y, width, height,
                  SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
 
@@ -12900,6 +12928,13 @@ DWORD WINAPI RenderThreadProc(void*) {
     SpringValue widthSpring;
     SpringValue heightSpring;
     SpringValue nudgeSpring;
+    // Slides the island to the screen edge while minimized (see
+    // g_minimizedEdgeFraction). It stays there while the line is hovered open:
+    // dropping the card back to its usual spot would leave the cursor, parked
+    // at the edge, outside it, and the island would flicker shut and open.
+    SpringValue edgeSpring;
+    edgeSpring.Reset(g_islandMinimized.load() ? 1.0f : 0.0f);
+    g_minimizedEdgeFraction = edgeSpring.value;
     widthSpring.Reset((g_settings.autoHideIdleSeconds == -1 ? 0.0f : 120.0f) * g_settings.sizeScale);
     heightSpring.Reset((g_settings.autoHideIdleSeconds == -1 ? 0.0f : 36.0f) * g_settings.sizeScale);
     nudgeSpring.Reset(0.0f);
@@ -13404,6 +13439,20 @@ DWORD WINAPI RenderThreadProc(void*) {
         }
 
         nudgeSpring.Step(dt * speed, 280.0f * styleStiffnessMult, 24.0f * styleDampingMult);
+
+        edgeSpring.target = minimizedMode ? 1.0f : 0.0f;
+        if (std::fabs(edgeSpring.target - edgeSpring.value) > 0.001f || std::fabs(edgeSpring.velocity) > 0.001f) {
+            // Critically damped so the window glides without overshooting past
+            // the screen edge.
+            edgeSpring.Step(dt * speed, 220.0f * styleStiffnessMult, 2.0f * std::sqrt(220.0f * styleStiffnessMult));
+            edgeSpring.value = Clamp(edgeSpring.value, 0.0f, 1.0f);
+            if (std::fabs(edgeSpring.target - edgeSpring.value) <= 0.001f && std::fabs(edgeSpring.velocity) <= 0.01f) {
+                edgeSpring.Reset(edgeSpring.target);
+            }
+            g_minimizedEdgeFraction = edgeSpring.value;
+            g_layoutDirty = true;  // Render() repositions the window when dirty
+            needsRender = true;
+        }
 
         {
             std::lock_guard lock(g_stateMutex);
