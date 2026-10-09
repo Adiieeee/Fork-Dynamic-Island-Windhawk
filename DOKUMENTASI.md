@@ -2,7 +2,7 @@
 
 Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rusak (misalnya setelah update Windows), dokumen ini menjelaskan **perilaku yang seharusnya**, **di mana kodenya**, dan **API Windows apa yang dipakai**, supaya perbaikan bisa mengembalikan fungsi yang sama persis.
 
-- **Versi kode saat dokumen ditulis:** `1.6.2` (header `@version`), sekitar 14.900 baris.
+- **Versi kode saat dokumen ditulis:** `1.6.3` (header `@version`), sekitar 14.900 baris.
 - **Nomor baris** di bawah berlaku untuk versi ini dan akan bergeser saat kode berubah. **Selalu cari nama fungsinya** (misalnya `grep -n "DrawMinimizedLine" mod.wh.cpp`). Nama fungsi adalah acuan utama; nomor baris hanya petunjuk awal.
 - Konvensi umum proyek (proses tool-mod, threading, lokalisasi) juga diringkas di `CLAUDE.md`.
 
@@ -53,7 +53,7 @@ Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rus
 "/c/Program Files/Windhawk/Compiler/bin/clang++.exe" -fsyntax-only -Wall -std=c++23 \
   -target x86_64-w64-mingw32 -DWH_MOD -DUNICODE -D_UNICODE \
   -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
-  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.6.2"' \
+  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.6.3"' \
   -include windhawk_api.h -x c++ mod.wh.cpp
 ```
 
@@ -80,7 +80,7 @@ Semua thread dibuat di `StartThreads()` (±14636) dan dihentikan oleh `StopThrea
 | Render | `RenderThreadProc` (13616) | membuat window overlay, memiliki `Renderer`, menjalankan frame loop, dan memproses pesan window |
 | Media | `MediaThreadProc` (3889) | poll SMTC tiap 1,5 detik: judul, artis, album, cover, posisi |
 | Audio | `AudioThreadProc` (5853) | WASAPI loopback untuk data waveform (hanya saat `g_audioCaptureNeeded`) |
-| Cuaca | `WeatherThreadProc` (5062) | WinHTTP ke wttr.in |
+| Cuaca | `WeatherThreadProc` (5337) | WinHTTP ke wttr.in, `Geolocator` (opsional) |
 | Lirik | `LyricsThreadProc` (5573) | LRCLIB untuk lirik ber-timestamp |
 | Cover fallback | `ArtworkThreadProc` (5759) | iTunes Search kalau SMTC tidak memberi cover |
 | Volume watcher | `VolumeWatcherThreadProc` (6344) | callback volume dari Windows (event, bukan poll) |
@@ -358,7 +358,14 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
 
 **Indeks:** `NormalizedTabIndex` (±1415, modulo jumlah tab), `HardwareMonitorTabIndex` (±1426, dipakai untuk memutuskan apakah GPU/net perlu dipoll), `FileTrayTabIndex` (±1433).
 
-**Cuaca:** `WeatherThreadProc` (±5062): `wttr.in/<kota>?format=j1` (HTTPS, fallback HTTP), membaca `current_condition`. Backoff kalau gagal; refresh saat kota berubah atau resume dari sleep. Setting: `Weather`, `WeatherCity` (kosong = lokasi dari IP), `WeatherFahrenheit`.
+**Cuaca:** `WeatherThreadProc` (±5337): `wttr.in/<lokasi>?format=j1` (HTTPS, fallback HTTP), membaca `current_condition` dan `areaName` (label). Refresh tiap 15 menit. Kalau gagal ada backoff 1/2/5/15 menit. Refresh juga terjadi saat setting lokasi berubah (`cityChanged` mencakup `WeatherUseLocation`) atau resume dari sleep. Setting: `Weather`, `WeatherUseLocation`, `WeatherCity`, `WeatherFahrenheit`.
+- **Prioritas lokasi (1.6.3):**
+  1. **Windows location** kalau `WeatherUseLocation` aktif. `QueryWindowsLocation` (±5293) memanggil `Geolocator::RequestAccessAsync` lalu `GetGeopositionAsync(maximumAge 10 menit, timeout 10 detik)` dengan akurasi Default (Wi-Fi, tanpa GPS). Hasilnya dikirim ke wttr.in sebagai `lat,lon` dengan 4 desimal.
+  2. `WeatherCity`, di-encode dengan `PercentEncodeUtf8`.
+  3. Tanpa path (`/?format=j1`): wttr.in menebak lokasi dari IP. Nama area dari tebakan ini bisa aneh, misalnya nama desa.
+- **Syarat Windows location:** Windows Settings → Privacy & security → Location, opsi "Let desktop apps access your location" harus aktif. Kalau ditolak, ada log `Weather: Windows location not allowed (status N)` (sekali saja). Kalau gagal, log `Weather: Windows location failed (0x...)`. Di kedua kasus mod jatuh ke langkah 2 atau 3.
+- **Kebutuhan teknis:** thread cuaca memanggil `winrt::init_apartment(MTA)` supaya bisa menunggu async WinRT. Kode di-guard oleh `DYNAMIC_ISLAND_HAS_GEOLOCATION` (`__has_include(<winrt/Windows.Devices.Geolocation.h>)`); tanpa header itu, fitur ini menjadi stub.
+- **Label:** tetap `areaName` dari wttr.in, yaitu nama area terdekat dari titik data. Hasilnya bisa nama kecamatan atau desa, bukan nama kota.
 
 ---
 
@@ -429,7 +436,7 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
 - **Animations:** TargetFPS, AnimationStyle, AnimationSpeed.
 - **Themes:** ThemePreset, PillOpacity, TintIntensity, BackdropMaterial/FillOpacity/Tint, MaterialDepth, DropShadow, AccentBloom, TextScale, AccentColorMode, CustomAccentHex, CalendarAccent, ClockAccentGlow, FontFamily, ContourBorderMode/Hex, PillBgColor, TextPrimary/SecondaryColor.
 - **Indicators:** PrivacyDots, PrivacyDotsMic/Cam (+warna).
-- **Modules:** Media, MediaAutoExpand, **LyricsDelayMs**, Volume, CapsLock, Battery, BluetoothIndicator, BluetoothShowBattery, Progress, TimerModule, Clipboard, StatusCountdownProgress, DoNotDisturbIndicator, NotificationRespectDnD, HardwareMonitorModule, GameOverlay(+Show*/Compact), ShowMetricText, Weather, WeatherCity, WeatherFahrenheit, Language, ClockFormat, ShowSeconds, DateFormat, DateFirst, FileTrayModule, FileTrayMaxItems, MediaExpandBlocklist.
+- **Modules:** Media, MediaAutoExpand, **LyricsDelayMs**, Volume, CapsLock, Battery, BluetoothIndicator, BluetoothShowBattery, Progress, TimerModule, Clipboard, StatusCountdownProgress, DoNotDisturbIndicator, NotificationRespectDnD, HardwareMonitorModule, GameOverlay(+Show*/Compact), ShowMetricText, Weather, **WeatherUseLocation**, WeatherCity, WeatherFahrenheit, Language, ClockFormat, ShowSeconds, DateFormat, DateFirst, FileTrayModule, FileTrayMaxItems, MediaExpandBlocklist.
 - **Shortcuts:** HideShowHotkeyEnabled, HideShowModifiers, HideShowKey.
 
 **Nilai tersimpan (`Wh_GetIntValue` / `Wh_SetIntValue`):**
@@ -452,7 +459,7 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
 
 | Layanan | Untuk | Endpoint | Jika berubah atau mati |
 |---|---|---|---|
-| wttr.in | cuaca | `https://wttr.in/<kota>?format=j1` | tab cuaca menampilkan "Loading..." |
+| wttr.in | cuaca | `https://wttr.in/<kota atau lat,lon>?format=j1` | tab cuaca menampilkan "Loading..." |
 | lrclib.net | lirik | `/api/get`, `/api/search` (field `syncedLyrics`) | lirik tidak muncul; pill tetap 150px |
 | itunes.apple.com | cover cadangan | `/search?media=music&entity=song` (field `artistName`, `artworkUrl100`) | badge sumber tampil kalau SMTC juga tidak memberi cover |
 
@@ -485,6 +492,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | Video fullscreen tidak menyembunyikan island / game ikut tersembunyi | `IsForegroundFullscreenVideo`, `WindowBelongsToMediaSource`, `playingMediaSources` di `MediaThreadProc` | format AUMID SMTC per browser/aplikasi, `GetApplicationUserModelId`, `ApplicationFrameHost` |
 | Garis terbuka saat hover di atas video fullscreen / island tidak menjadi garis | `videoSuppressed`, `videoLine`, `edgeSpring` di render loop | — |
 | Video tertentu tidak terdeteksi | baca log `Full screen, not video:` lalu tambah aturan di `WindowBelongsToMediaSource` | AUMID SMTC vs `PKEY_AppUserModel_ID` |
+| Cuaca tidak mengikuti lokasi laptop | `QueryWindowsLocation` (cek log `Weather: Windows location ...`), urutan fallback di `WeatherThreadProc` | `Windows.Devices.Geolocation`, izin lokasi desktop app |
 | Hardware monitor 0/kosong | `GetGpuUsage`, `GetNetworkUsage` | PDH counter berbahasa Inggris (`PdhAddEnglishCounterW`) |
 | Posisi salah di multi-monitor | `GetAnchorWorkRect`, `MonitorEnumProc` | `EnumDisplayMonitors`, DPI |
 
@@ -504,6 +512,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | 1.4.0 | **Lirik LRCLIB** di pill collapsed (+ toggle, cache, retry); pembacaan cover bertahap; **cover cadangan iTunes**; `HttpGet` aman untuk biner + timeout; lebar pill dinamis mengikuti lirik (lead 0,35 detik, jeda ≥ 4 detik kembali normal); setting **Lyrics delay (ms)** |
 | 1.5.0 | **Minimize**: garis glass + waveform, menempel 3px dari tepi layar, hitbox kecil tanpa jeda, hover membuka card |
 | 1.6.0 | **Notifikasi inline** di tengah pill musik (tanpa pill kedua, lebar mengikuti notifikasi, maks 460); **tab Aktivitas** untuk Timer/Progress; durasi notifikasi sesaat maksimal 3 detik |
+| 1.6.3 | **Cuaca mengikuti Windows location** (opsional `WeatherUseLocation`, tiap refresh 15 menit, fallback ke kota lalu IP) |
 | 1.6.2 | **Fullscreen video menjadi garis minimize** (bukan hilang); game dan fullscreen lain tidak terpengaruh; hover/pin tidak membukanya; hanya volume dan privasi yang muncul; pause tetap jadi garis (sticky); deteksi lewat AUMID jendela + log diagnostik |
 | 1.6.1 | **Volume instan** (callback Core Audio, bukan poll 1 detik); **OSD volume Windows disembunyikan** selama mod aktif (hook menelan `VK_VOLUME_*`) + log diagnostik |
 

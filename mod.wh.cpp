@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.6.2
+// @version         1.6.3
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -367,9 +367,12 @@ We love community contributions! To ensure high-quality updates, please follow t
   - Weather: true
     $name: Weather module
     $description: Shows the weather on the right side of the pill. Turn off to only show the clock.
+  - WeatherUseLocation: false
+    $name: Use Windows location for weather
+    $description: Follow this device's position from Windows Location services (Wi-Fi based, checked once per weather refresh, every 15 minutes) so the weather updates when you travel. Requires Settings > Privacy & security > Location with "Let desktop apps access your location" on. Falls back to Weather City, then IP geolocation, when the position is unavailable.
   - WeatherCity: ""
     $name: Weather City (Optional)
-    $description: Enter your city (e.g. London). Leave blank to use auto IP geolocation.
+    $description: Enter your city (e.g. London). Leave blank to use auto IP geolocation. Also used as the fallback when Windows location is on but unavailable.
   - WeatherFahrenheit: false
     $name: Use Fahrenheit
     $description: Display weather temperature and wind speed in imperial units.
@@ -530,6 +533,13 @@ We love community contributions! To ensure high-quality updates, please follow t
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 #else
 #define DYNAMIC_ISLAND_HAS_BLUETOOTH_WATCHER 0
+#endif
+
+#if __has_include(<winrt/Windows.Devices.Geolocation.h>)
+#define DYNAMIC_ISLAND_HAS_GEOLOCATION 1
+#include <winrt/Windows.Devices.Geolocation.h>
+#else
+#define DYNAMIC_ISLAND_HAS_GEOLOCATION 0
 #endif
 
 using Microsoft::WRL::ComPtr;
@@ -992,6 +1002,7 @@ struct Settings {
     bool showMetricText = true;
     bool weather = true;
     std::wstring weatherCity;
+    bool weatherUseLocation = false;
     bool weatherFahrenheit = false;
     int autoHideIdleSeconds = 0;
     bool autoHideFullscreen = true;
@@ -2303,6 +2314,7 @@ void LoadSettings() {
     next.showMetricText = Wh_GetIntSetting(L"Modules.ShowMetricText") != 0;
     next.weather = Wh_GetIntSetting(L"Modules.Weather") != 0;
     next.weatherCity = GetStringSettingWithFallback(L"Modules.WeatherCity", L"Weather.WeatherCity", L"CalendarWeather.WeatherCity");
+    next.weatherUseLocation = Wh_GetIntSetting(L"Modules.WeatherUseLocation") != 0;
     next.weatherFahrenheit = Wh_GetIntSetting(L"Modules.WeatherFahrenheit") != 0;
     const std::wstring hideSec = GetStringSettingWithFallback(L"Behavior.AutoHideIdleSeconds", L"Appearance.AutoHideIdleSeconds");
     next.autoHideIdleSeconds = hideSec.empty() ? 0 : _wtoi(hideSec.c_str());
@@ -2535,7 +2547,8 @@ void LoadSettings() {
     bool capsLockChanged = false;
     {
         std::lock_guard lock(g_settingsMutex);
-        cityChanged = next.weatherCity != g_settings.weatherCity;
+        cityChanged = next.weatherCity != g_settings.weatherCity ||
+                      next.weatherUseLocation != g_settings.weatherUseLocation;
         // The keyboard hook also intercepts the volume keys, so it depends on
         // the Volume module as well.
         capsLockChanged = next.capsLock != g_settings.capsLock || next.volume != g_settings.volume;
@@ -5270,12 +5283,68 @@ std::wstring PercentEncodeUtf8(const std::wstring& text) {
     return out;
 }
 
+// Asks Windows Location services for this device's position, as a wttr.in
+// "lat,lon" path segment, or empty when location is off, denied for desktop
+// apps, or no fix arrives in time. Called once per weather refresh (15 min),
+// never continuously, and accepts a fix up to 10 minutes old so Windows can
+// usually answer from its cache without a fresh Wi-Fi scan. Default accuracy
+// (Wi-Fi / cell, no GPS) is plenty for weather and the cheapest on battery.
+// The weather thread is an MTA, so blocking on .get() is allowed here.
+std::wstring QueryWindowsLocation() {
+#if DYNAMIC_ISLAND_HAS_GEOLOCATION
+    using namespace winrt::Windows::Devices::Geolocation;
+    static bool loggedDenied = false;
+    try {
+        const GeolocationAccessStatus access = Geolocator::RequestAccessAsync().get();
+        if (access != GeolocationAccessStatus::Allowed) {
+            if (!loggedDenied) {
+                Wh_Log(L"Weather: Windows location not allowed (status %d); using city/IP instead.",
+                       static_cast<int>(access));
+                loggedDenied = true;
+            }
+            return {};
+        }
+        loggedDenied = false;
+
+        Geolocator locator;
+        locator.DesiredAccuracy(PositionAccuracy::Default);
+        const auto maximumAge = std::chrono::minutes(10);
+        const auto timeout = std::chrono::seconds(10);
+        const Geoposition position = locator.GetGeopositionAsync(
+            std::chrono::duration_cast<winrt::Windows::Foundation::TimeSpan>(maximumAge),
+            std::chrono::duration_cast<winrt::Windows::Foundation::TimeSpan>(timeout)).get();
+        const BasicGeoposition point = position.Coordinate().Point().Position();
+
+        wchar_t segment[64] = {};
+        // Four decimals is ~11 m, far finer than the weather grid, and keeps
+        // the request (which goes to a third-party service) from carrying an
+        // exact street-level fix.
+        swprintf_s(segment, L"%.4f,%.4f", point.Latitude, point.Longitude);
+        // swprintf follows the C locale, which the mod never changes, so the
+        // decimal separator is always '.'.
+        Wh_Log(L"Weather: Windows location fix obtained.");
+        return segment;
+    } catch (const winrt::hresult_error& e) {
+        Wh_Log(L"Weather: Windows location failed (0x%08X); using city/IP instead.",
+               static_cast<unsigned>(e.code()));
+    } catch (...) {
+        Wh_Log(L"Weather: Windows location failed; using city/IP instead.");
+    }
+#endif
+    return {};
+}
+
 DWORD WINAPI WeatherThreadProc(void*) {
+#if DYNAMIC_ISLAND_HAS_GEOLOCATION
+    // Geolocator is a WinRT API; MTA so its async calls can be waited on here.
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+#endif
     // Initial delay to avoid slowing down startup
     WaitForSingleObject(g_stopEvent, 3000);
 
     while (WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
         std::wstring cityOverride;
+        bool useLocation = false;
         bool isFahrenheit = false;
         bool weatherEnabled = true;
         {
@@ -5285,6 +5354,7 @@ DWORD WINAPI WeatherThreadProc(void*) {
             std::lock_guard lock(g_settingsMutex);
             weatherEnabled = g_settings.weather;
             cityOverride = g_settings.weatherCity;
+            useLocation = g_settings.weatherUseLocation;
             isFahrenheit = g_settings.weatherFahrenheit;
         }
 
@@ -5294,7 +5364,12 @@ DWORD WINAPI WeatherThreadProc(void*) {
         }
 
         std::wstring url = L"/?format=j1";
-        if (!cityOverride.empty()) {
+        // Windows location first (when enabled), then the typed city, then
+        // wttr.in's own IP geolocation (the bare "/?format=j1").
+        const std::wstring coordinates = useLocation ? QueryWindowsLocation() : std::wstring();
+        if (!coordinates.empty()) {
+            url = L"/" + coordinates + L"?format=j1";
+        } else if (!cityOverride.empty()) {
             const std::wstring encodedCity = PercentEncodeUtf8(cityOverride);
             if (!encodedCity.empty()) {
                 url = L"/" + encodedCity + L"?format=j1";
@@ -5465,6 +5540,9 @@ DWORD WINAPI WeatherThreadProc(void*) {
             backoffIndex = 0;
         }
     }
+#if DYNAMIC_ISLAND_HAS_GEOLOCATION
+    winrt::uninit_apartment();
+#endif
     return 0;
 }
 
