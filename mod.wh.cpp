@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.6.0
+// @version         1.6.1
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -324,7 +324,7 @@ We love community contributions! To ensure high-quality updates, please follow t
     $description: Shifts the synced lyrics in the collapsed pill. Positive values show each line later, negative values earlier. Use it if lyrics appear ahead of or behind the song (e.g. 500 = half a second later). Lyrics are turned on or off with the button next to the playback controls.
   - Volume: true
     $name: Volume slider flyout
-    $description: Shows a volume slider banner on the island when adjusting system volume. Disable if you prefer the default Windows volume flyout.
+    $description: Shows a volume slider banner on the island when adjusting system volume. While on, the island handles the volume keys itself and the Windows volume flyout stays hidden (it comes back when this is disabled or the mod is turned off).
   - CapsLock: true
     $name: Caps Lock module
     $description: Shows an indicator when Caps Lock or Num Lock state changes.
@@ -974,7 +974,7 @@ struct Settings {
     // Enforced in three places, because any one of them alone leaks:
     //   ChooseActivities        - the pill is never selected for display
     //   WM_APP_CAPSLOCK handler - no state is recorded, no nudge is triggered
-    //   CapsLockHookWanted      - WH_KEYBOARD_LL is not installed at all
+    //   KeyboardHookWanted      - WH_KEYBOARD_LL is not installed for it
     // The activity gate is the one that actually hides the pill; the others stop
     // the work leading up to it.
     bool capsLock = true;
@@ -2533,7 +2533,9 @@ void LoadSettings() {
     {
         std::lock_guard lock(g_settingsMutex);
         cityChanged = next.weatherCity != g_settings.weatherCity;
-        capsLockChanged = next.capsLock != g_settings.capsLock;
+        // The keyboard hook also intercepts the volume keys, so it depends on
+        // the Volume module as well.
+        capsLockChanged = next.capsLock != g_settings.capsLock || next.volume != g_settings.volume;
         hotkeySettingChanged =
             next.hideShowHotkeyEnabled != g_settings.hideShowHotkeyEnabled ||
             next.hideShowModifiers != g_settings.hideShowModifiers ||
@@ -6218,22 +6220,229 @@ void UpdateSystemSnapshot(bool includeGpuStats, bool includeNetStats) {
         }
     }
 
+    // The volume pill is raised by VolumeChangeCallback the instant Windows
+    // reports a change. This once-a-second poll used to raise it too, which is
+    // what made it lag up to a second behind the key press (and the number
+    // only tick over once a second while the key was held). It now just keeps
+    // the level in g_state.system current for the dashboards.
     std::lock_guard lock(g_stateMutex);
-    const bool volumeChanged =
-        g_volumeInitialized &&
-        (std::abs(next.volumePercent - g_state.system.volumePercent) >= 2 ||
-         next.volumeMuted != g_state.system.volumeMuted);
     g_state.system = next;
     g_state.muted = next.volumeMuted;
-    if (volumeChanged && g_settings.volume) {
+    g_volumeInitialized = true;
+}
+
+// ── Instant volume feedback ──────────────────────────────────────────────────
+
+// Records a volume change and raises the volume pill. Called from the endpoint
+// callback, on an audio thread.
+void ReportVolumeChange(int percent, bool muted) {
+    if (!g_settings.volume) {
+        return;
+    }
+    {
+        std::lock_guard lock(g_stateMutex);
+        g_state.system.volumePercent = percent;
+        g_state.system.volumeMuted = muted;
+        g_state.muted = muted;
         g_state.volume.active = true;
-        g_state.volume.percent = next.volumePercent;
-        g_state.volume.muted = next.volumeMuted;
+        g_state.volume.percent = percent;
+        g_state.volume.muted = muted;
         g_state.volume.deviceName = L"System audio";
         g_state.volume.expiresAt = NowSeconds() + 1.8;
-        TriggerNudge();
     }
-    g_volumeInitialized = true;
+    g_layoutDirty = true;
+    TriggerNudge();  // also wakes a parked (auto-hidden) island
+}
+
+// Windows calls OnNotify on every change to the default output's volume or
+// mute, whatever made it: keys, the taskbar slider, an app.
+class VolumeChangeCallback final : public IAudioEndpointVolumeCallback {
+   public:
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IAudioEndpointVolumeCallback)) {
+            *ppv = static_cast<IAudioEndpointVolumeCallback*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return ++refs_; }
+    STDMETHODIMP_(ULONG) Release() override {
+        const ULONG r = --refs_;
+        if (r == 0) delete this;
+        return r;
+    }
+
+    STDMETHODIMP OnNotify(PAUDIO_VOLUME_NOTIFICATION_DATA data) override {
+        if (!data) return S_OK;
+        const int percent = ClampInt(static_cast<int>(data->fMasterVolume * 100.0f + 0.5f), 0, 100);
+        const bool muted = data->bMuted != FALSE;
+        // Channel-only changes also arrive here; only a change the pill shows counts.
+        const bool percentChanged = lastPercent_.exchange(percent) != percent;
+        const bool muteChanged = lastMuted_.exchange(muted) != muted;
+        if (percentChanged || muteChanged) {
+            ReportVolumeChange(percent, muted);
+        }
+        return S_OK;
+    }
+
+    // Baseline for a newly watched device, so registering is not a "change".
+    void Prime(int percent, bool muted) {
+        lastPercent_ = percent;
+        lastMuted_ = muted;
+    }
+
+   private:
+    std::atomic<ULONG> refs_{1};
+    std::atomic<int> lastPercent_{-1};
+    std::atomic<bool> lastMuted_{false};
+};
+
+// Signals when the default output device changes (speakers -> headset), so the
+// volume callback can be moved to the new device.
+class DefaultDeviceWatcher final : public IMMNotificationClient {
+   public:
+    explicit DefaultDeviceWatcher(HANDLE changedEvent) : changedEvent_(changedEvent) {}
+
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IMMNotificationClient)) {
+            *ppv = static_cast<IMMNotificationClient*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return ++refs_; }
+    STDMETHODIMP_(ULONG) Release() override {
+        const ULONG r = --refs_;
+        if (r == 0) delete this;
+        return r;
+    }
+
+    STDMETHODIMP OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR) override {
+        if (flow == eRender && role == eConsole) {
+            SetEvent(changedEvent_);
+        }
+        return S_OK;
+    }
+    STDMETHODIMP OnDeviceStateChanged(LPCWSTR, DWORD) override { return S_OK; }
+    STDMETHODIMP OnDeviceAdded(LPCWSTR) override { return S_OK; }
+    STDMETHODIMP OnDeviceRemoved(LPCWSTR) override { return S_OK; }
+    STDMETHODIMP OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
+
+   private:
+    std::atomic<ULONG> refs_{1};
+    HANDLE changedEvent_;
+};
+
+HANDLE g_volumeWatcherThread = nullptr;
+
+DWORD WINAPI VolumeWatcherThreadProc(void*) {
+    const HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    HANDLE deviceChanged = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
+
+    VolumeChangeCallback* callback = new VolumeChangeCallback();
+    DefaultDeviceWatcher* watcher = deviceChanged ? new DefaultDeviceWatcher(deviceChanged) : nullptr;
+    if (enumerator && watcher) {
+        enumerator->RegisterEndpointNotificationCallback(watcher);
+    }
+
+    ComPtr<IAudioEndpointVolume> endpoint;
+    auto attach = [&]() {
+        if (endpoint) {
+            endpoint->UnregisterControlChangeNotify(callback);
+            endpoint.Reset();
+        }
+        ComPtr<IMMDevice> device;
+        if (!enumerator || FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device)) || !device ||
+            FAILED(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                                    reinterpret_cast<void**>(endpoint.GetAddressOf())))) {
+            endpoint.Reset();
+            return;
+        }
+        float level = 0.0f;
+        BOOL muted = FALSE;
+        endpoint->GetMasterVolumeLevelScalar(&level);
+        endpoint->GetMute(&muted);
+        callback->Prime(ClampInt(static_cast<int>(level * 100.0f + 0.5f), 0, 100), muted != FALSE);
+        if (FAILED(endpoint->RegisterControlChangeNotify(callback))) {
+            endpoint.Reset();
+        }
+    };
+    attach();
+
+    HANDLE events[] = {g_stopEvent, deviceChanged};
+    const DWORD count = deviceChanged ? 2 : 1;
+    while (true) {
+        // The timeout retries when no output device existed at startup.
+        const DWORD wait = WaitForMultipleObjects(count, events, FALSE, endpoint ? INFINITE : 5000);
+        if (wait == WAIT_OBJECT_0) {
+            break;
+        }
+        attach();
+    }
+
+    if (endpoint) {
+        endpoint->UnregisterControlChangeNotify(callback);
+        endpoint.Reset();
+    }
+    if (enumerator && watcher) {
+        enumerator->UnregisterEndpointNotificationCallback(watcher);
+    }
+    enumerator.Reset();
+    callback->Release();
+    if (watcher) watcher->Release();
+    if (deviceChanged) CloseHandle(deviceChanged);
+    if (SUCCEEDED(hrCo)) {
+        CoUninitialize();
+    }
+    return 0;
+}
+
+// Applies a volume key the keyboard hook swallowed (so the Windows volume
+// flyout never sees it). Runs on the window thread; the resulting change comes
+// back through VolumeChangeCallback and raises the island's own pill.
+void ApplyVolumeKey(UINT vk) {
+    static ComPtr<IAudioEndpointVolume> s_endpoint;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (!s_endpoint) {
+            ComPtr<IMMDeviceEnumerator> enumerator;
+            ComPtr<IMMDevice> device;
+            if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                        IID_PPV_ARGS(&enumerator))) ||
+                FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device)) ||
+                FAILED(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                                        reinterpret_cast<void**>(s_endpoint.GetAddressOf())))) {
+                s_endpoint.Reset();
+                return;
+            }
+        }
+        HRESULT hr = E_FAIL;
+        if (vk == VK_VOLUME_UP) {
+            hr = s_endpoint->VolumeStepUp(nullptr);
+        } else if (vk == VK_VOLUME_DOWN) {
+            hr = s_endpoint->VolumeStepDown(nullptr);
+        } else if (vk == VK_VOLUME_MUTE) {
+            BOOL muted = FALSE;
+            hr = s_endpoint->GetMute(&muted);
+            if (SUCCEEDED(hr)) {
+                hr = s_endpoint->SetMute(!muted, nullptr);
+            }
+        }
+        if (SUCCEEDED(hr)) {
+            return;
+        }
+        // The cached endpoint goes stale when the default device changes or is
+        // unplugged; fetch the current one and try once more.
+        s_endpoint.Reset();
+    }
 }
 
 // ---- Privacy indicator helpers ----
@@ -12547,6 +12756,9 @@ std::vector<IslandKind> ChooseActivities(const SharedState& state, const Setting
 }
 
 constexpr UINT WM_APP_CAPSLOCK = WM_APP + 0x444;
+// A volume key the hook swallowed: wParam = vk, lParam = 1 if it was injected
+// (e.g. sent by an OEM hotkey utility for Fn + F keys).
+constexpr UINT WM_APP_VOLUME_KEY = WM_APP + 0x449;
 HHOOK g_keyboardHook = nullptr;
 HANDLE g_keyboardThread = nullptr;
 DWORD g_keyboardThreadId = 0;
@@ -12563,8 +12775,30 @@ DWORD g_keyboardThreadId = 0;
 //
 // The WM_APP_CAPSLOCK handler writes exactly the same fields on the window
 // thread, after checking the setting. Nothing is lost by only posting.
+//
+// Volume keys are swallowed while the Volume module is on: the Windows volume
+// flyout is raised by the shell handling the key, not by the volume changing,
+// so keeping the key from the shell keeps the flyout away and the island's own
+// pill is the only one. The step itself is applied on the window thread
+// (ApplyVolumeKey) -- again nothing but a post here. With the mod off, or the
+// module disabled, the hook passes them through and the flyout is back.
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
+        auto* volumeKbd = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+        const DWORD vk = volumeKbd->vkCode;
+        if (vk == VK_VOLUME_UP || vk == VK_VOLUME_DOWN || vk == VK_VOLUME_MUTE) {
+            HWND hwnd = g_hwnd;
+            // A manually hidden island cannot show its pill, so the keys go
+            // back to Windows then and its flyout gives the feedback instead.
+            if (g_settings.volume && hwnd && !g_manuallyHidden.load(std::memory_order_relaxed)) {
+                if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {  // includes auto-repeat
+                    const bool injected = (volumeKbd->flags & LLKHF_INJECTED) != 0;
+                    PostMessageW(hwnd, WM_APP_VOLUME_KEY, vk, injected ? 1 : 0);
+                }
+                return 1;  // swallow both down and up
+            }
+        }
+
         if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
             auto* kbd = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
             if (kbd->vkCode == VK_CAPITAL || kbd->vkCode == VK_NUMLOCK) {
@@ -12581,11 +12815,11 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 // A system-wide WH_KEYBOARD_LL puts this process on the path of every keystroke
-// on the desktop, so it is only installed while it has something to report. The
-// hook exists solely to notice Caps Lock and Num Lock for the indicator pill;
-// with that module off it was still running for nothing.
-static bool CapsLockHookWanted() {
-    return g_settings.capsLock;
+// on the desktop, so it is only installed while it has something to do: notice
+// Caps Lock and Num Lock for the indicator pill, or take over the volume keys
+// for the Volume module.
+static bool KeyboardHookWanted() {
+    return g_settings.capsLock || g_settings.volume;
 }
 
 // Wakes the keyboard thread so it re-evaluates whether the hook is needed.
@@ -12604,7 +12838,7 @@ DWORD WINAPI KeyboardThreadProc(void*) {
 
     bool quit = false;
     while (!quit && WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
-        const bool wanted = CapsLockHookWanted();
+        const bool wanted = KeyboardHookWanted();
         if (wanted && !g_keyboardHook) {
             g_keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, nullptr, 0);
         } else if (!wanted && g_keyboardHook) {
@@ -12847,6 +13081,23 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // No-op payload — its only job is to wake MsgWaitForMultipleObjects
             // and get drained by the PeekMessage pump.
             return 0;
+
+        case WM_APP_VOLUME_KEY: {
+            ApplyVolumeKey(static_cast<UINT>(wParam));
+
+            // Diagnostic, so it can be confirmed which keys (Fn + F, a volume
+            // knob) actually come through as volume keys. Rate-limited per
+            // key/injected pair so a spun knob does not flood the log.
+            static ULONGLONG s_lastLog[3][2] = {};
+            const int keyIndex = wParam == VK_VOLUME_UP ? 0 : (wParam == VK_VOLUME_DOWN ? 1 : 2);
+            const int injectedIndex = lParam ? 1 : 0;
+            const ULONGLONG nowMs = GetTickCount64();
+            if (nowMs - s_lastLog[keyIndex][injectedIndex] >= 2000) {
+                s_lastLog[keyIndex][injectedIndex] = nowMs;
+                Wh_Log(L"Volume key: vk=0x%X injected=%d", static_cast<unsigned>(wParam), injectedIndex);
+            }
+            return 0;
+        }
 
         case WM_APP_CAPSLOCK: {
             if (!g_settings.capsLock) return 0;
@@ -14400,6 +14651,7 @@ bool StartThreads() {
     g_weatherThread = CreateThread(nullptr, 0, WeatherThreadProc, nullptr, 0, nullptr);
     g_lyricsThread = CreateThread(nullptr, 0, LyricsThreadProc, nullptr, 0, nullptr);
     g_artworkThread = CreateThread(nullptr, 0, ArtworkThreadProc, nullptr, 0, nullptr);
+    g_volumeWatcherThread = CreateThread(nullptr, 0, VolumeWatcherThreadProc, nullptr, 0, nullptr);
     g_keyboardThread = CreateThread(nullptr, 0, KeyboardThreadProc, nullptr, 0, &g_keyboardThreadId);
     g_mouseThread = CreateThread(nullptr, 0, MouseThreadProc, nullptr, 0, &g_mouseThreadId);
 #if DYNAMIC_ISLAND_HAS_USER_NOTIFICATION_LISTENER
@@ -14423,7 +14675,7 @@ void StopThreads() {
         SetEvent(g_stopEvent);
     }
 
-    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_lyricsThread, g_artworkThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread};
+    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_lyricsThread, g_artworkThread, g_volumeWatcherThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread};
     for (HANDLE handle : handles) {
         if (handle) {
             WaitForSingleObject(handle, 3000);
@@ -14437,6 +14689,7 @@ void StopThreads() {
     g_weatherThread = nullptr;
     g_lyricsThread = nullptr;
     g_artworkThread = nullptr;
+    g_volumeWatcherThread = nullptr;
     g_notificationThread = nullptr;
     g_keyboardThread = nullptr;
     g_keyboardThreadId = 0;
