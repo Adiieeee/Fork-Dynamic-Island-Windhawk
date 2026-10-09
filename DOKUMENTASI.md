@@ -2,7 +2,7 @@
 
 Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rusak (misalnya setelah update Windows), dokumen ini menjelaskan **perilaku yang seharusnya**, **di mana kodenya**, dan **API Windows apa yang dipakai**, supaya perbaikan bisa mengembalikan fungsi yang sama persis.
 
-- **Versi kode saat dokumen ditulis:** `1.6.3` (header `@version`), sekitar 14.900 baris.
+- **Versi kode saat dokumen ditulis:** `1.7.2` (header `@version`), sekitar 14.900 baris.
 - **Nomor baris** di bawah berlaku untuk versi ini dan akan bergeser saat kode berubah. **Selalu cari nama fungsinya** (misalnya `grep -n "DrawMinimizedLine" mod.wh.cpp`). Nama fungsi adalah acuan utama; nomor baris hanya petunjuk awal.
 - Konvensi umum proyek (proses tool-mod, threading, lokalisasi) juga diringkas di `CLAUDE.md`.
 
@@ -19,7 +19,7 @@ Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rus
 7. [Fitur: Minimize (garis tipis)](#7-fitur-minimize-garis-tipis)
 8. [Fitur: Notifikasi sesaat & notifikasi inline](#8-fitur-notifikasi-sesaat--notifikasi-inline)
 9. [Fitur: Volume (instan + OSD Windows disembunyikan)](#9-fitur-volume)
-10. [Fitur: Tab dashboard (Kalender, Cuaca, Hardware, File Tray, Aktivitas)](#10-fitur-tab-dashboard)
+10. [Fitur: Tab dashboard (Tanggal & Cuaca, Hardware, File Tray, Aktivitas)](#10-fitur-tab-dashboard)
 11. [Fitur: Idle strip, Game overlay, Privasi, Timer](#11-fitur-idle-strip-game-overlay-privasi-timer)
 12. [Fitur: Posisi, tema, backdrop, auto-hide, hotkey, menu](#12-fitur-posisi-tema-backdrop-auto-hide-hotkey-menu)
 13. [Settings (Mod Settings) & nilai tersimpan](#13-settings--nilai-tersimpan)
@@ -53,7 +53,7 @@ Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rus
 "/c/Program Files/Windhawk/Compiler/bin/clang++.exe" -fsyntax-only -Wall -std=c++23 \
   -target x86_64-w64-mingw32 -DWH_MOD -DUNICODE -D_UNICODE \
   -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
-  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.6.3"' \
+  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.2"' \
   -include windhawk_api.h -x c++ mod.wh.cpp
 ```
 
@@ -345,18 +345,27 @@ Kartu penuh per jenis (dipakai saat **tidak ada musik**): `DrawClipboard` (±116
 
 Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe horizontal (> 40px dalam < 500ms). Titik paginasi vertikal ada di kanan.
 
-**Urutan tab** (harus sama dengan `ActiveTabCount` ±1406, dan dua daftar `activeTabs` di `DrawIdleDashboard` ±9924 dan `DrawMedia` ±10352):
-1. Utama: Media (kalau ada musik) atau Jam (`DrawTimeDashboard` ±9774)
-2. Kalender: `DrawCalendarDashboard` (±8821), grid bulan dengan hari ini ditandai warna aksen
-3. Cuaca (opsional): `DrawWeatherDashboard` (±9283)
-4. Hardware Monitor (opsional): `DrawHardwareMonitorDashboard` (±9634). CPU, RAM, GPU (PDH `\GPU Engine(*)\Utilization Percentage`), disk, jaringan (PDH `\Network Interface(*)\Bytes Sent/Received/sec`). Bar menjadi kuning di atas 75% dan merah di atas 90%.
-5. File Tray (opsional): `DrawFileTrayDashboard` (±9478). File di-drop ke island (`WM_DROPFILES`), hanya path yang disimpan, klik untuk membuka (`ShellExecuteExW`), kapasitas lewat `FileTrayMaxItems`.
-6. **Aktivitas** (otomatis, paling akhir): `DrawActivityDashboard` (±11903). Muncul saat Focus Timer berjalan atau progress aktif.
+**Urutan tab** (harus sama dengan `ActiveTabCount` ±1420, dan dua daftar `activeTabs` di `DrawIdleDashboard` ±10212 dan `DrawMedia` ±10641):
+1. Utama: Media (kalau ada musik) atau Jam (`DrawTimeDashboard`)
+2. **Tanggal & Cuaca** (sejak 1.7.0, menggantikan tab Kalender dan Cuaca yang terpisah): `DrawDateWeatherDashboard` (±9605).
+   - **Kiri:** hero tanggal dari `DrawCalendarHero` (±9130), berisi bulan (aksen), tahun, angka tanggal besar (`calDayLargeFormat_` 63px), dan nama hari. Helper ini juga dipakai tab kalender, jadi keduanya identik.
+   - **Sudut kartu** memakai `InsetCardRadius` (±9121): radius island (`ContentIslandRadius`) dikurangi 16px, dibatasi 6–30. Hasilnya 28 untuk pill, 6 untuk notch dan W11. Dengan begitu sudut kartu konsentris dengan island dan tidak terlihat kotak. Teks di dalam hero digeser beberapa px menjauhi sudut.
+   - **Divider** hairline di `left+130`.
+   - **Kanan** (`left+146 … right−26`):
+     - nama kota (`state.weather.city` atau "Locating...");
+     - ikon cuaca vektor 60px (`DrawWeatherIcon`) dan suhu dengan face 63px yang sama dengan angka tanggal (`calDayLargeFormat_`, alignment disimpan lalu dikembalikan);
+     - deskripsi (`weatherDescFormat_`, maksimal 2 baris di `top+99…123`, ukuran font adaptif 11,5 → 9,5);
+     - **3 chip** (tinggi 28, rata bawah dengan hero, bobot lebar 1,4 : 1 : 1). Isinya glyph `DrawMetricGlyph` 0/1/2 (angin, termometer, tetes) ditambah angka dalam `boldTextFormat_`, tanpa label. Sejak 1.7.2 visual kompas, termometer, dan ring di 1.7.1 dihapus karena terlalu berat.
+   - Kalau modul **Weather mati**, tab ini kembali menjadi `DrawCalendarDashboard`: hero ditambah grid bulan, dengan hari ini ditandai warna aksen.
+   - `DrawWeatherDashboard` lama sudah dihapus.
+3. Hardware Monitor (opsional): `DrawHardwareMonitorDashboard` (±9634). CPU, RAM, GPU (PDH `\GPU Engine(*)\Utilization Percentage`), disk, jaringan (PDH `\Network Interface(*)\Bytes Sent/Received/sec`). Bar menjadi kuning di atas 75% dan merah di atas 90%.
+4. File Tray (opsional): `DrawFileTrayDashboard` (±9478). File di-drop ke island (`WM_DROPFILES`), hanya path yang disimpan, klik untuk membuka (`ShellExecuteExW`), kapasitas lewat `FileTrayMaxItems`.
+5. **Aktivitas** (otomatis, paling akhir): `DrawActivityDashboard` (±11903). Muncul saat Focus Timer berjalan atau progress aktif.
    - Timer: label Focus/Break (+Paused), countdown `mm:ss` besar, bar oranye (fokus) atau hijau (break), dan hint "Right-click the island to pause or stop".
    - Progress: label dan bar persen.
    - `ActivityTabIndex` (±1442) selalu indeks terakhir, jadi tab lain tidak bergeser.
 
-**Indeks:** `NormalizedTabIndex` (±1415, modulo jumlah tab), `HardwareMonitorTabIndex` (±1426, dipakai untuk memutuskan apakah GPU/net perlu dipoll), `FileTrayTabIndex` (±1433).
+**Indeks:** `NormalizedTabIndex` (±1428, modulo jumlah tab), `HardwareMonitorTabIndex` (±1441, selalu `2` sejak 1.7.0, dipakai untuk memutuskan apakah GPU/net perlu dipoll), `FileTrayTabIndex` (±1448, `2 + hardware`). Modul Weather tidak lagi memengaruhi jumlah tab.
 
 **Cuaca:** `WeatherThreadProc` (±5337): `wttr.in/<lokasi>?format=j1` (HTTPS, fallback HTTP), membaca `current_condition` dan `areaName` (label). Refresh tiap 15 menit. Kalau gagal ada backoff 1/2/5/15 menit. Refresh juga terjadi saat setting lokasi berubah (`cityChanged` mencakup `WeatherUseLocation`) atau resume dari sleep. Setting: `Weather`, `WeatherUseLocation`, `WeatherCity`, `WeatherFahrenheit`.
 - **Prioritas lokasi (1.6.3):**
@@ -459,7 +468,9 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
 
 | Layanan | Untuk | Endpoint | Jika berubah atau mati |
 |---|---|---|---|
-| wttr.in | cuaca | `https://wttr.in/<kota atau lat,lon>?format=j1` | tab cuaca menampilkan "Loading..." |
+| wttr.in | cuaca | `https://wttr.in/<kota atau lat,lon>?format=j1` | fallback ke Open-Meteo (di bawah) |
+| api.open-meteo.com | cuaca cadangan (1.7.2) | `/v1/forecast?latitude=..&longitude=..&current=...` | sisi kanan tab Tanggal & Cuaca menampilkan "Locating..." / "Loading..." |
+| geocoding-api.open-meteo.com | kota → koordinat untuk fallback | `/v1/search?count=1&name=<kota>` (di-cache per kota) | fallback tidak jalan kalau hanya mengandalkan IP |
 | lrclib.net | lirik | `/api/get`, `/api/search` (field `syncedLyrics`) | lirik tidak muncul; pill tetap 150px |
 | itunes.apple.com | cover cadangan | `/search?media=music&entity=song` (field `artistName`, `artworkUrl100`) | badge sumber tampil kalau SMTC juga tidak memberi cover |
 
@@ -512,6 +523,9 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | 1.4.0 | **Lirik LRCLIB** di pill collapsed (+ toggle, cache, retry); pembacaan cover bertahap; **cover cadangan iTunes**; `HttpGet` aman untuk biner + timeout; lebar pill dinamis mengikuti lirik (lead 0,35 detik, jeda ≥ 4 detik kembali normal); setting **Lyrics delay (ms)** |
 | 1.5.0 | **Minimize**: garis glass + waveform, menempel 3px dari tepi layar, hitbox kecil tanpa jeda, hover membuka card |
 | 1.6.0 | **Notifikasi inline** di tengah pill musik (tanpa pill kedua, lebar mengikuti notifikasi, maks 460); **tab Aktivitas** untuk Timer/Progress; durasi notifikasi sesaat maksimal 3 detik |
+| 1.7.2 | Chip cuaca kembali sederhana (glyph + angka), ikon cuaca 60px. **Fallback Open-Meteo** saat wttr.in gagal/timeout (`FetchOpenMeteo`, `GeocodeCityOpenMeteo`, `WmoToWwoCode`); wttr.in dilewati selama 1 jam setelah gagal. Log: `Weather: Requesting fallback from api.open-meteo.com`, `Weather parsed success (Open-Meteo)` |
+| 1.7.1 | Revisi tab Tanggal & Cuaca: sudut kartu konsentris dengan island (`InsetCardRadius`); ikon cuaca 52px dan suhu 63px; tile kompas angin / termometer terasa / ring kelembapan menggantikan chip polos |
+| 1.7.0 | **Tab Tanggal & Cuaca**: tab kalender dan cuaca digabung (hero tanggal kiri, kondisi cuaca kanan + 3 chip angin/terasa/kelembapan); fallback ke kalender lama kalau Weather mati; `DrawCalendarHero` diekstrak, `DrawWeatherDashboard` dihapus |
 | 1.6.3 | **Cuaca mengikuti Windows location** (opsional `WeatherUseLocation`, tiap refresh 15 menit, fallback ke kota lalu IP) |
 | 1.6.2 | **Fullscreen video menjadi garis minimize** (bukan hilang); game dan fullscreen lain tidak terpengaruh; hover/pin tidak membukanya; hanya volume dan privasi yang muncul; pause tetap jadi garis (sticky); deteksi lewat AUMID jendela + log diagnostik |
 | 1.6.1 | **Volume instan** (callback Core Audio, bukan poll 1 detik); **OSD volume Windows disembunyikan** selama mod aktif (hook menelan `VK_VOLUME_*`) + log diagnostik |

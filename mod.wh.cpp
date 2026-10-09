@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.6.3
+// @version         1.7.2
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -56,7 +56,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 
 ## ⚙️ Usage & Settings
 
-- **Hover & Scroll:** Hover over the island to seamlessly expand it. Use your mouse scroll wheel to swipe between the Media, Calendar, Weather, Hardware Monitor, and File Tray tabs.
+- **Hover & Scroll:** Hover over the island to seamlessly expand it. Use your mouse scroll wheel to swipe between the Media, Date & Weather (today's date beside the current conditions; the monthly calendar when the Weather module is off), Hardware Monitor, and File Tray tabs.
 - **File Tray:** Enable the File Tray module, then drag files onto the island. It jumps to the shelf to confirm the drop. Click a row to open that file; right-click the island to clear the shelf.
 - **Alerts while music plays:** Volume, clipboard, Caps Lock, notifications, battery, USB, Bluetooth and Do Not Disturb alerts appear inside the media pill, between the album art and the waveform (briefly replacing the lyric line), and the pill stretches to fit them. A running focus timer or progress task gets its own Activity tab at the end of the scroll loop instead.
 - **Minimize:** The button left of "previous" on the media card tucks the island away into a thin glass line with a faint live waveform. Hover the line to open the full island; click the button again to bring the normal pill back. Alerts such as volume or notifications still pop out while minimized.
@@ -366,7 +366,7 @@ We love community contributions! To ensure high-quality updates, please follow t
     $description: Adds text labels (like "CPU") inside the game overlay bars.
   - Weather: true
     $name: Weather module
-    $description: Shows the weather on the right side of the pill. Turn off to only show the clock.
+    $description: Shows the weather on the right side of the pill and on the Date & Weather tab. Turn off to only show the clock (the tab then shows the monthly calendar).
   - WeatherUseLocation: false
     $name: Use Windows location for weather
     $description: Follow this device's position from Windows Location services (Wi-Fi based, checked once per weather refresh, every 15 minutes) so the weather updates when you travel. Requires Settings > Privacy & security > Location with "Let desktop apps access your location" on. Falls back to Weather City, then IP geolocation, when the position is unavailable.
@@ -1418,8 +1418,7 @@ int ClampInt(int v, int lo, int hi) {
 // arithmetic used to be copy-pasted in seven places, which is exactly how they
 // drifted out of sync.
 int ActiveTabCount(const Settings& settings) {
-    int count = 2;  // primary (media or clock) + calendar
-    if (settings.weather) ++count;
+    int count = 2;  // primary (media or clock) + date & weather
     if (settings.hardwareMonitorModule) ++count;
     if (settings.fileTrayModule) ++count;
     if (g_activityTabVisible.load(std::memory_order_relaxed)) ++count;
@@ -1432,7 +1431,9 @@ int NormalizedTabIndex(const Settings& settings) {
     return ((raw % total) + total) % total;
 }
 
-// Tab order is always: primary, calendar, weather?, hardware?, file tray?, activity?
+// Tab order is always: primary, date & weather, hardware?, file tray?, activity?
+// (Date and weather share one tab since 1.7.0; with Weather off it is the
+// plain calendar.)
 // The expensive GPU / network counters are only sampled while the hardware card
 // is actually on screen, so that check needs the card's real index rather than
 // assuming it is the last tab -- which stopped being true once the File Tray
@@ -1441,14 +1442,14 @@ int HardwareMonitorTabIndex(const Settings& settings) {
     if (!settings.hardwareMonitorModule) {
         return -1;
     }
-    return 2 + (settings.weather ? 1 : 0);
+    return 2;
 }
 
 int FileTrayTabIndex(const Settings& settings) {
     if (!settings.fileTrayModule) {
         return -1;
     }
-    return 2 + (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0);
+    return 2 + (settings.hardwareMonitorModule ? 1 : 0);
 }
 
 // The Activity tab (focus timer / progress) is always last, so it appearing and
@@ -5334,6 +5335,145 @@ std::wstring QueryWindowsLocation() {
     return {};
 }
 
+// ── Open-Meteo fallback ──────────────────────────────────────────────────────
+// wttr.in is a free community service that is regularly overloaded or down
+// for hours (requests simply time out). Open-Meteo (free, no key) is used when
+// it fails and a position is known: Windows location coordinates or the typed
+// city, geocoded through Open-Meteo's own search. There is no fallback for the
+// pure IP-geolocation case, which Open-Meteo does not offer.
+
+// Reads the number following `"key":` inside `json` (C locale, so '.' decimal).
+bool JsonNumberField(const char* json, const char* key, double& out) {
+    const std::string needle = std::string("\"") + key + "\":";
+    const char* p = strstr(json, needle.c_str());
+    if (!p) {
+        return false;
+    }
+    p += needle.size();
+    while (*p == ' ' || *p == '\"') p++;
+    char* end = nullptr;
+    const double value = strtod(p, &end);
+    if (end == p) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+// Maps a WMO weather code (Open-Meteo) onto the WWO code wttr.in uses, so the
+// icon and visual logic stay keyed on one code set, plus an English
+// description in wttr.in's style.
+int WmoToWwoCode(int wmo, std::wstring& desc) {
+    switch (wmo) {
+        case 0: desc = L"Clear"; return 113;
+        case 1: desc = L"Mainly clear"; return 113;
+        case 2: desc = L"Partly cloudy"; return 116;
+        case 3: desc = L"Overcast"; return 122;
+        case 45: case 48: desc = L"Fog"; return 248;
+        case 51: case 53: case 55: desc = L"Drizzle"; return 266;
+        case 56: case 57: desc = L"Freezing drizzle"; return 281;
+        case 61: desc = L"Light rain"; return 296;
+        case 63: desc = L"Moderate rain"; return 302;
+        case 65: desc = L"Heavy rain"; return 308;
+        case 66: case 67: desc = L"Freezing rain"; return 311;
+        case 71: desc = L"Light snow"; return 326;
+        case 73: desc = L"Moderate snow"; return 332;
+        case 75: desc = L"Heavy snow"; return 338;
+        case 77: desc = L"Snow grains"; return 326;
+        case 80: desc = L"Light rain shower"; return 353;
+        case 81: desc = L"Rain shower"; return 356;
+        case 82: desc = L"Torrential rain shower"; return 359;
+        case 85: desc = L"Light snow showers"; return 368;
+        case 86: desc = L"Heavy snow showers"; return 371;
+        case 95: desc = L"Thunderstorm"; return 389;
+        case 96: case 99: desc = L"Thunderstorm with hail"; return 395;
+        default: desc = L"Unknown"; return 0;
+    }
+}
+
+// Resolves a typed city to "lat,lon" with Open-Meteo's geocoding search.
+// Cached per city, since the answer never changes for the same text.
+std::wstring GeocodeCityOpenMeteo(const std::wstring& city) {
+    static std::wstring cachedCity;
+    static std::wstring cachedCoordinates;
+    if (!cachedCity.empty() && cachedCity == city) {
+        return cachedCoordinates;
+    }
+
+    auto lookup = [](const std::wstring& name) -> std::wstring {
+        const std::wstring encoded = PercentEncodeUtf8(name);
+        if (encoded.empty()) {
+            return {};
+        }
+        const std::wstring path = L"/v1/search?count=1&format=json&name=" + encoded;
+        const std::string res = HttpGet(L"geocoding-api.open-meteo.com", path.c_str(), true);
+        const char* results = strstr(res.c_str(), "\"results\":");
+        double lat = 0.0;
+        double lon = 0.0;
+        if (!results || !JsonNumberField(results, "latitude", lat) || !JsonNumberField(results, "longitude", lon)) {
+            return {};
+        }
+        wchar_t segment[64] = {};
+        swprintf_s(segment, L"%.4f,%.4f", lat, lon);
+        return segment;
+    };
+
+    std::wstring coordinates = lookup(city);
+    // "Bandung, Indonesia" style input: the search wants just the place name.
+    const size_t comma = city.find(L',');
+    if (coordinates.empty() && comma != std::wstring::npos && comma > 0) {
+        coordinates = lookup(city.substr(0, comma));
+    }
+    if (!coordinates.empty()) {
+        cachedCity = city;
+        cachedCoordinates = coordinates;
+    }
+    return coordinates;
+}
+
+// Fetches current conditions for "lat,lon" from Open-Meteo into the same
+// fields the wttr.in parser fills. Returns false when nothing usable came back.
+bool FetchOpenMeteo(const std::wstring& coordinates, bool fahrenheit, float& temp, int& code,
+                    std::wstring& desc, std::wstring& windSpeed, std::wstring& windDir,
+                    std::wstring& humidity, std::wstring& feelsLike) {
+    const size_t comma = coordinates.find(L',');
+    if (comma == std::wstring::npos) {
+        return false;
+    }
+    std::wstring path = L"/v1/forecast?latitude=" + coordinates.substr(0, comma) +
+                        L"&longitude=" + coordinates.substr(comma + 1) +
+                        L"&current=temperature_2m,apparent_temperature,relative_humidity_2m,"
+                        L"weather_code,wind_speed_10m,wind_direction_10m";
+    if (fahrenheit) {
+        path += L"&temperature_unit=fahrenheit&wind_speed_unit=mph";
+    }
+    Wh_Log(L"Weather: Requesting fallback from api.open-meteo.com");
+    const std::string res = HttpGet(L"api.open-meteo.com", path.c_str(), true);
+    // "current":{ ... } -- the "current_units" block before it has the same
+    // keys, so the search starts past it.
+    const char* current = strstr(res.c_str(), "\"current\":{");
+    double t = 0.0, feels = 0.0, hum = 0.0, wmo = -1.0, wind = 0.0, dir = -1.0;
+    if (!current || !JsonNumberField(current, "temperature_2m", t) ||
+        !JsonNumberField(current, "weather_code", wmo)) {
+        Wh_Log(L"Weather: Open-Meteo returned no usable reading (size: %zu bytes).", res.size());
+        return false;
+    }
+    JsonNumberField(current, "apparent_temperature", feels);
+    JsonNumberField(current, "relative_humidity_2m", hum);
+    JsonNumberField(current, "wind_speed_10m", wind);
+    JsonNumberField(current, "wind_direction_10m", dir);
+
+    temp = static_cast<float>(t);
+    code = WmoToWwoCode(static_cast<int>(wmo), desc);
+    windSpeed = std::to_wstring(static_cast<int>(std::lround(wind)));
+    humidity = std::to_wstring(static_cast<int>(std::lround(hum)));
+    feelsLike = std::to_wstring(static_cast<int>(std::lround(feels)));
+    static const wchar_t* kPoints[16] = {L"N", L"NNE", L"NE", L"ENE", L"E", L"ESE", L"SE", L"SSE",
+                                         L"S", L"SSW", L"SW", L"WSW", L"W", L"WNW", L"NW", L"NNW"};
+    windDir = dir >= 0.0 ? kPoints[static_cast<int>(std::fmod(dir + 11.25, 360.0) / 22.5) % 16] : L"";
+    return code != 0;
+}
+
 DWORD WINAPI WeatherThreadProc(void*) {
 #if DYNAMIC_ISLAND_HAS_GEOLOCATION
     // Geolocator is a WinRT API; MTA so its async calls can be waited on here.
@@ -5376,25 +5516,37 @@ DWORD WINAPI WeatherThreadProc(void*) {
             }
         }
 
-        Wh_Log(L"Weather: Requesting weather from wttr.in/host: wttr.in, path: %s", url.c_str());
-        std::string wRes = HttpGet(L"wttr.in", url.c_str(), true);
-        if (wRes.empty()) {
-            Wh_Log(L"Weather: HTTPS request failed, retrying over plain HTTP...");
-            wRes = HttpGet(L"wttr.in", url.c_str(), false);
+        // After wttr.in has failed, skip it for an hour while a fallback
+        // position exists: each failed attempt costs ~25 s of timeouts
+        // (HTTPS, then plain HTTP) before Open-Meteo is reached.
+        static double wttrRetryAt = 0.0;
+        const bool canFallBack = !coordinates.empty() || !cityOverride.empty();
+        const bool skipWttr = canFallBack && NowSeconds() < wttrRetryAt;
+
+        std::string wRes;
+        if (skipWttr) {
+            Wh_Log(L"Weather: wttr.in failed recently, using Open-Meteo directly.");
+        } else {
+            Wh_Log(L"Weather: Requesting weather from wttr.in/host: wttr.in, path: %s", url.c_str());
+            wRes = HttpGet(L"wttr.in", url.c_str(), true);
+            if (wRes.empty()) {
+                Wh_Log(L"Weather: HTTPS request failed, retrying over plain HTTP...");
+                wRes = HttpGet(L"wttr.in", url.c_str(), false);
+            }
         }
 
         bool weatherCommitted = false;
+        float temp = 0.0f;
+        int code = 0;
+        std::wstring desc = L"";
+        std::wstring windSpeed = L"";
+        std::wstring windDir = L"";
+        std::wstring humidity = L"";
+        std::wstring feelsLike = L"";
+        std::wstring cityLabel = L"Local Weather";
 
         if (!wRes.empty()) {
             Wh_Log(L"Weather: Received response from wttr.in (size: %zu bytes)", wRes.size());
-            float temp = 0.0f;
-            int code = 0;
-            std::wstring desc = L"";
-            std::wstring windSpeed = L"";
-            std::wstring windDir = L"";
-            std::wstring humidity = L"";
-            std::wstring feelsLike = L"";
-            std::wstring cityLabel = L"Local Weather";
 
             const char* areaStr = strstr(wRes.c_str(), "\"areaName\":");
             if (areaStr) {
@@ -5492,23 +5644,43 @@ DWORD WINAPI WeatherThreadProc(void*) {
             } else {
                 Wh_Log(L"Weather: Failed to find \"current_condition\" in response.");
             }
-
-            if (weatherCommitted) {
-                std::lock_guard lock(g_stateMutex);
-                g_state.weather.hasData = true;
-                g_state.weather.temperature = temp;
-                g_state.weather.weatherCode = code;
-                if (!cityOverride.empty()) g_state.weather.city = cityOverride;
-                else g_state.weather.city = cityLabel;
-                g_state.weather.weatherDesc = desc;
-                g_state.weather.windSpeed = windSpeed;
-                g_state.weather.windDir = windDir;
-                g_state.weather.humidity = humidity;
-                g_state.weather.feelsLike = feelsLike;
-                g_state.weather.lastUpdated = NowSeconds();
-            }
-        } else {
+        } else if (!skipWttr) {
             Wh_Log(L"Weather: HttpGet returned empty response.");
+        }
+
+        if (!weatherCommitted && canFallBack) {
+            if (!skipWttr) {
+                wttrRetryAt = NowSeconds() + 3600.0;
+            }
+            const std::wstring position = !coordinates.empty() ? coordinates : GeocodeCityOpenMeteo(cityOverride);
+            if (position.empty()) {
+                Wh_Log(L"Weather: could not resolve a position for Open-Meteo.");
+            } else if (FetchOpenMeteo(position, isFahrenheit, temp, code, desc, windSpeed, windDir,
+                                      humidity, feelsLike)) {
+                weatherCommitted = true;
+                // Open-Meteo has no place names; keep the last known one.
+                std::lock_guard lock(g_stateMutex);
+                if (g_state.weather.hasData && !g_state.weather.city.empty()) {
+                    cityLabel = g_state.weather.city;
+                }
+                Wh_Log(L"Weather parsed success (Open-Meteo): temp=%.1f, feelsLike=%s, humidity=%s%%, desc=%s",
+                       temp, feelsLike.c_str(), humidity.c_str(), desc.c_str());
+            }
+        }
+
+        if (weatherCommitted) {
+            std::lock_guard lock(g_stateMutex);
+            g_state.weather.hasData = true;
+            g_state.weather.temperature = temp;
+            g_state.weather.weatherCode = code;
+            if (!cityOverride.empty()) g_state.weather.city = cityOverride;
+            else g_state.weather.city = cityLabel;
+            g_state.weather.weatherDesc = desc;
+            g_state.weather.windSpeed = windSpeed;
+            g_state.weather.windDir = windDir;
+            g_state.weather.humidity = humidity;
+            g_state.weather.feelsLike = feelsLike;
+            g_state.weather.lastUpdated = NowSeconds();
         }
 
         // Retry soon after a failure instead of leaving the dashboard empty for
@@ -9113,17 +9285,28 @@ class Renderer {
 
 
 
-    void DrawCalendarDashboard(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now, float scale, SYSTEMTIME& local) {
-        (void)state;
-        (void)now;
+    // Corner radius for a card inset inside the expanded island: the island's
+    // own radius minus the ~16px gap to the card, so the card's corners run
+    // concentric with the island's instead of looking boxy beside them. Works
+    // for every shape (pill 44 -> 28, notch 16 / Windows 11 8 -> the 6 floor).
+    float InsetCardRadius(D2D1_RECT_F islandRect, float scale) const {
+        const float islandRadius = ContentIslandRadius(islandRect.bottom - islandRect.top);
+        return Clamp(islandRadius - 16.0f * scale, 6.0f * scale, 30.0f * scale);
+    }
 
+    // Today's date hero card on the left of the card (month, year, day figure,
+    // weekday). Shared by the calendar tab and the combined date & weather tab
+    // so both stay pixel-identical. Returns the accent brush it used, which the
+    // calendar grid reuses for today's marker.
+    ComPtr<ID2D1SolidColorBrush> DrawCalendarHero(D2D1_RECT_F rect, const Settings& settings,
+                                                  float scale, SYSTEMTIME& local) {
         // ── Hero column ──────────────────────────────────────────────────────
         // Today's date as an editorial block: month over a large day figure over
         // the weekday. Uses the shared DrawCard so it matches every other panel
         // instead of being a one-off translucent slab.
         const D2D1_RECT_F hero = D2D1::RectF(rect.left + 22.0f * scale, rect.top + 16.0f * scale,
                                              rect.left + 115.0f * scale, rect.bottom - 20.0f * scale);
-        DrawCard(hero, 12.0f * scale);
+        DrawCard(hero, InsetCardRadius(rect, scale));
 
         // The accent is the album-art / system accent like everywhere else. This
         // used to fall back to a hardcoded red (#D94A38) whenever the mode wasn't
@@ -9161,8 +9344,8 @@ class Renderer {
             target_->DrawTextW(calendarCachedMonthName_.c_str(),
                                static_cast<UINT32>(calendarCachedMonthName_.size()),
                                boldTextFormat_.Get(),
-                               D2D1::RectF(hero.left + 3.0f * scale, hero.top + 6.0f * scale,
-                                           hero.right - 3.0f * scale, hero.top + 22.0f * scale),
+                               D2D1::RectF(hero.left + 3.0f * scale, hero.top + 10.0f * scale,
+                                           hero.right - 3.0f * scale, hero.top + 26.0f * scale),
                                accent.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
@@ -9173,8 +9356,8 @@ class Renderer {
             smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             target_->DrawTextW(yearStr, static_cast<UINT32>(wcslen(yearStr)), smallTextFormat_.Get(),
-                               D2D1::RectF(hero.left, hero.top + 21.0f * scale,
-                                           hero.right, hero.top + 36.0f * scale),
+                               D2D1::RectF(hero.left, hero.top + 25.0f * scale,
+                                           hero.right, hero.top + 40.0f * scale),
                                mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
             smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
@@ -9185,8 +9368,8 @@ class Renderer {
         textBrush_->SetOpacity(0.97f);
         target_->DrawTextW(dayStr, static_cast<UINT32>(wcslen(dayStr)),
                            calDayLargeFormat_ ? calDayLargeFormat_.Get() : hugeTextFormat_.Get(),
-                           D2D1::RectF(hero.left, hero.top + 34.0f * scale,
-                                       hero.right, hero.bottom - 26.0f * scale),
+                           D2D1::RectF(hero.left, hero.top + 37.0f * scale,
+                                       hero.right, hero.bottom - 29.0f * scale),
                            textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
 
         mutedBrush_->SetOpacity(0.70f);
@@ -9194,10 +9377,19 @@ class Renderer {
             target_->DrawTextW(calendarCachedWeekdayName_.c_str(),
                                static_cast<UINT32>(calendarCachedWeekdayName_.size()),
                                boldTextFormat_.Get(),
-                               D2D1::RectF(hero.left + 4.0f * scale, hero.bottom - 24.0f * scale,
-                                           hero.right - 4.0f * scale, hero.bottom - 6.0f * scale),
+                               D2D1::RectF(hero.left + 4.0f * scale, hero.bottom - 28.0f * scale,
+                                           hero.right - 4.0f * scale, hero.bottom - 10.0f * scale),
                                mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
+
+        return accent;
+    }
+
+    void DrawCalendarDashboard(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now, float scale, SYSTEMTIME& local) {
+        (void)state;
+        (void)now;
+
+        ComPtr<ID2D1SolidColorBrush> accent = DrawCalendarHero(rect, settings, scale, local);
 
         // ── Month grid ───────────────────────────────────────────────────────
         const float gridStart = rect.left + 134.0f * scale;
@@ -9575,75 +9767,89 @@ class Renderer {
         }
     }
 
-    void DrawWeatherDashboard(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now, float scale, bool hasWeather, const std::wstring& wIcon, const std::wstring& wText) {
-        wchar_t wTemp[32] = {};
-        if (hasWeather) swprintf_s(wTemp, L"%.0f\x00B0", state.weather.temperature);
-        else wcscpy_s(wTemp, L"--\x00B0");
+    // Date & Weather tab: today's date hero on the left (shared with the
+    // calendar tab through DrawCalendarHero) and the current conditions on the
+    // right -- place, icon + temperature, description, then a row of three
+    // small chips (wind, feels like, humidity) as glyph + number. Replaced the separate calendar
+    // and weather tabs; with the Weather module off the calendar tab is shown
+    // instead (see the activeTabs lists).
+    void DrawDateWeatherDashboard(const SharedState& state, D2D1_RECT_F rect, const Settings& settings,
+                                  double now, float scale, SYSTEMTIME& local, bool hasWeather,
+                                  const std::wstring& wText) {
+        (void)now;
+        DrawCalendarHero(rect, settings, scale, local);
 
-        std::wstring city = hasWeather ? state.weather.city : std::wstring(Loc(L"Locating..."));
-        std::wstring desc = wText;
+        // Same vertical band as the hero card (top + 16 .. bottom - 20), so the
+        // two halves share a top and bottom edge. The right inset leaves room
+        // for the pagination dots.
+        const float bandTop = rect.top + 16.0f * scale;
+        const float bandBottom = rect.bottom - 20.0f * scale;
+        const float dividerX = rect.left + 130.0f * scale;
+        const float colLeft = rect.left + 146.0f * scale;
+        const float colRight = rect.right - 26.0f * scale;
 
-        // ── Layout ───────────────────────────────────────────────────────────
-        // Left is an editorial hero block (place / reading / condition), left
-        // aligned so the city, temperature and description share one optical
-        // margin. Right is a stack of metric cards using the same card primitive
-        // as every other dashboard. The old version centred each element in its
-        // own box, which is what left the icon and the temperature floating apart
-        // with a dead gap between them.
-        const float heroLeft = rect.left + 26.0f * scale;
-        const float heroRight = rect.left + 188.0f * scale;
-        const float dividerX = rect.left + 200.0f * scale;
-        const float metricLeft = rect.left + 214.0f * scale;
-        const float metricRight = rect.right - 22.0f * scale;
+        ComPtr<ID2D1SolidColorBrush> divider;
+        target_->CreateSolidColorBrush(WithAlpha(material_.hairline, material_.hairline.a * settingsOpacity_), &divider);
+        if (divider) {
+            target_->FillRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(dividerX, rect.top + 34.0f * scale,
+                                              dividerX + 1.0f * scale, rect.bottom - 34.0f * scale),
+                                  0.5f * scale, 0.5f * scale), divider.Get());
+        }
 
         // Accent-tinted icon brushes: `strong` carries the shape, `soft` the
-        // secondary detail (rain, rays, fog bands).
+        // secondary detail (rain, rays, fog bands) and the chip glyphs.
         ComPtr<ID2D1SolidColorBrush> iconStrong;
         ComPtr<ID2D1SolidColorBrush> iconSoft;
         target_->CreateSolidColorBrush(WithAlpha(material_.accent, 0.95f * settingsOpacity_), &iconStrong);
-        target_->CreateSolidColorBrush(WithAlpha(material_.accent, 0.42f * settingsOpacity_), &iconSoft);
+        target_->CreateSolidColorBrush(WithAlpha(material_.accent, 0.55f * settingsOpacity_), &iconSoft);
 
-        // Place label.
+        // ── Place ────────────────────────────────────────────────────────────
+        const std::wstring city = hasWeather ? state.weather.city : std::wstring(Loc(L"Locating..."));
         textBrush_->SetOpacity(0.55f);
         if (smallTextFormat_) {
             smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
             target_->DrawTextW(city.c_str(), static_cast<UINT32>(city.length()), smallTextFormat_.Get(),
-                               D2D1::RectF(heroLeft, rect.top + 26.0f * scale, heroRight, rect.top + 44.0f * scale),
+                               D2D1::RectF(colLeft, bandTop + 2.0f * scale, colRight, bandTop + 18.0f * scale),
                                textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
-        // Icon and temperature share one band and sit adjacent, so they read as
-        // a single unit instead of two centred items.
-        const float readingCenterY = rect.top + 82.0f * scale;
-        if (hasWeather && iconStrong && iconSoft) {
-            DrawWeatherIcon(D2D1::Point2F(heroLeft + 22.0f * scale, readingCenterY), 44.0f * scale,
-                            WeatherVisualFromCode(state.weather.weatherCode),
+        // ── Reading: icon and temperature as one unit ────────────────────────
+        // The temperature uses the date figure's 63px face, so the two big
+        // numbers on the card match.
+        const float readingCenterY = rect.top + 68.0f * scale;
+        if (iconStrong && iconSoft) {
+            DrawWeatherIcon(D2D1::Point2F(colLeft + 30.0f * scale, readingCenterY), 60.0f * scale,
+                            hasWeather ? WeatherVisualFromCode(state.weather.weatherCode) : WeatherVisual::Unknown,
                             iconStrong.Get(), iconSoft.Get());
-        } else if (iconStrong && iconSoft) {
-            DrawWeatherIcon(D2D1::Point2F(heroLeft + 22.0f * scale, readingCenterY), 44.0f * scale,
-                            WeatherVisual::Unknown, iconStrong.Get(), iconSoft.Get());
         }
 
-        textBrush_->SetOpacity(0.98f);
-        if (hugeTextFormat_) {
-            hugeTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            target_->DrawTextW(wTemp, static_cast<UINT32>(wcslen(wTemp)), hugeTextFormat_.Get(),
-                               D2D1::RectF(heroLeft + 52.0f * scale, readingCenterY - 32.0f * scale,
-                                           heroRight, readingCenterY + 32.0f * scale),
-                               textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
-            hugeTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        wchar_t wTemp[32] = {};
+        if (hasWeather) swprintf_s(wTemp, L"%.0f\x00B0", state.weather.temperature);
+        else wcscpy_s(wTemp, L"--\x00B0");
+        IDWriteTextFormat* tempFmt = calDayLargeFormat_ ? calDayLargeFormat_.Get() : hugeTextFormat_.Get();
+        if (tempFmt) {
+            const DWRITE_TEXT_ALIGNMENT prevAlign = tempFmt->GetTextAlignment();
+            const DWRITE_PARAGRAPH_ALIGNMENT prevPara = tempFmt->GetParagraphAlignment();
+            tempFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            tempFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            textBrush_->SetOpacity(0.98f);
+            target_->DrawTextW(wTemp, static_cast<UINT32>(wcslen(wTemp)), tempFmt,
+                               D2D1::RectF(colLeft + 66.0f * scale, readingCenterY - 40.0f * scale,
+                                           colRight, readingCenterY + 40.0f * scale),
+                               textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            tempFmt->SetTextAlignment(prevAlign);
+            tempFmt->SetParagraphAlignment(prevPara);
         }
 
-        const float descTop = rect.top + 120.0f * scale;
-        const float descBottom = rect.top + 162.0f * scale;
-
-        // Description
+        // ── Description, up to two lines, font shrinking with length ─────────
+        const std::wstring& desc = wText;
         const size_t descLength = desc.length();
-        float descFontSize = 13.5f;
-        if (descLength > 58) descFontSize = 9.8f;
-        else if (descLength > 44) descFontSize = 10.5f;
-        else if (descLength > 32) descFontSize = 11.5f;
-        else if (descLength > 22) descFontSize = 12.5f;
+        float descFontSize = 11.5f;
+        if (descLength > 44) descFontSize = 9.5f;
+        else if (descLength > 32) descFontSize = 10.0f;
+        else if (descLength > 22) descFontSize = 10.8f;
         descFontSize *= scale;
 
         if (std::fabs(weatherDescFormatSize_ - descFontSize) > 0.01f || !weatherDescFormat_) {
@@ -9686,81 +9892,54 @@ class Renderer {
             weatherDescFormatSize_ = descFontSize;
         }
 
-        textBrush_->SetOpacity(0.82f);
+        textBrush_->SetOpacity(0.80f);
         target_->DrawTextW(desc.c_str(), static_cast<UINT32>(desc.length()),
                            weatherDescFormat_ ? weatherDescFormat_.Get() : textFormat_.Get(),
-                           D2D1::RectF(heroLeft, descTop, heroRight, descBottom),
-                           textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
-        textBrush_->SetOpacity(0.96f);
+                           D2D1::RectF(colLeft + 2.0f * scale, rect.top + 104.0f * scale,
+                                       colRight, rect.top + 134.0f * scale),
+                           textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
-        // Hairline divider, inset from both ends so it reads as a separator
-        // rather than a full-height rule.
-        ComPtr<ID2D1SolidColorBrush> divider;
-        target_->CreateSolidColorBrush(WithAlpha(material_.hairline, material_.hairline.a * settingsOpacity_), &divider);
-        target_->FillRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(dividerX, rect.top + 34.0f * scale,
-                                          dividerX + 1.0f * scale, rect.bottom - 34.0f * scale),
-                              0.5f * scale, 0.5f * scale), divider.Get());
-
-        // ── Metric cards ─────────────────────────────────────────────────────
-        // Each card is icon + label on one line with the value beneath, which
-        // keeps long localized labels from colliding with the value the way a
-        // single "Label: value" line did.
-        struct Metric {
-            int glyph;
-            const wchar_t* label;
-            std::wstring value;
-        };
+        // ── Chips: wind, feels like, humidity ────────────────────────────────
+        // A plain pill per value: metric glyph + number, no labels (nothing to
+        // fit or translate). Wind is wider because its value carries a unit.
+        const float chipGap = 6.0f * scale;
+        const float chipH = 28.0f * scale;
+        const float chipTop = bandBottom - chipH;
+        const float chipRadius = std::min(InsetCardRadius(rect, scale) * 0.5f, chipH * 0.5f);
+        const float weights[3] = {1.4f, 1.0f, 1.0f};
+        const float chipSpan = (colRight - colLeft) - chipGap * 2.0f;
 
         const std::wstring windUnit = settings.weatherFahrenheit ? L" mph" : L" km/h";
-        const Metric metrics[3] = {
-            {0, Loc(L"Wind"),
-             hasWeather ? state.weather.windSpeed + windUnit + L" " + WindDirToArrow(state.weather.windDir)
-                        : std::wstring(L"--")},
-            {1, Loc(L"Feels Like"),
-             hasWeather ? state.weather.feelsLike + L"\x00B0" : std::wstring(L"--")},
-            {2, Loc(L"Humidity"),
-             hasWeather ? state.weather.humidity + L"%" : std::wstring(L"--")},
+        const std::wstring values[3] = {
+            hasWeather ? state.weather.windSpeed + windUnit : std::wstring(L"--"),
+            hasWeather ? state.weather.feelsLike + L"\x00B0" : std::wstring(L"--"),
+            hasWeather ? state.weather.humidity + L"%" : std::wstring(L"--"),
         };
 
-        const float cardH = 40.0f * scale;
-        const float cardGap = 7.0f * scale;
-        const float stackH = cardH * 3.0f + cardGap * 2.0f;
-        float cardTop = (rect.top + rect.bottom) * 0.5f - stackH * 0.5f;
-
-        for (const Metric& m : metrics) {
-            const D2D1_RECT_F card = D2D1::RectF(metricLeft, cardTop, metricRight, cardTop + cardH);
-            DrawCard(card, 10.0f * scale);
-
-            if (iconSoft) {
-                DrawMetricGlyph(D2D1::Point2F(card.left + 17.0f * scale, card.top + 14.0f * scale),
-                                14.0f * scale, m.glyph, iconSoft.Get());
+        IDWriteTextFormat* chipFmt = boldTextFormat_ ? boldTextFormat_.Get() : smallTextFormat_.Get();
+        float chipX = colLeft;
+        for (int i = 0; i < 3; ++i) {
+            const float chipW = chipSpan * weights[i] / 3.4f;
+            const D2D1_RECT_F chip = D2D1::RectF(chipX, chipTop, chipX + chipW, chipTop + chipH);
+            DrawCard(chip, chipRadius);
+            if (iconStrong) {
+                DrawMetricGlyph(D2D1::Point2F(chip.left + 13.0f * scale, (chip.top + chip.bottom) * 0.5f),
+                                12.0f * scale, i, iconStrong.Get());
             }
-
-            const float textLeft = card.left + 30.0f * scale;
-            if (smallTextFormat_) {
-                smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                mutedBrush_->SetOpacity(0.62f);
-                target_->DrawTextW(m.label, static_cast<UINT32>(wcslen(m.label)), smallTextFormat_.Get(),
-                                   D2D1::RectF(textLeft, card.top + 4.0f * scale,
-                                               card.right - 8.0f * scale, card.top + 20.0f * scale),
-                                   mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-            }
-
-            if (textFormat_) {
-                textFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                textFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                textBrush_->SetOpacity(0.95f);
-                target_->DrawTextW(m.value.c_str(), static_cast<UINT32>(m.value.size()), textFormat_.Get(),
-                                   D2D1::RectF(textLeft, card.top + 19.0f * scale,
-                                               card.right - 8.0f * scale, card.bottom - 3.0f * scale),
+            if (chipFmt) {
+                const DWRITE_TEXT_ALIGNMENT prevAlign = chipFmt->GetTextAlignment();
+                const DWRITE_PARAGRAPH_ALIGNMENT prevPara = chipFmt->GetParagraphAlignment();
+                chipFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                chipFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                textBrush_->SetOpacity(0.94f);
+                target_->DrawTextW(values[i].c_str(), static_cast<UINT32>(values[i].size()), chipFmt,
+                                   D2D1::RectF(chip.left + 24.0f * scale, chip.top,
+                                               chip.right - 4.0f * scale, chip.bottom),
                                    textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                textFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+                chipFmt->SetTextAlignment(prevAlign);
+                chipFmt->SetParagraphAlignment(prevPara);
             }
-
-            cardTop += cardH + cardGap;
+            chipX += chipW + chipGap;
         }
 
         textBrush_->SetOpacity(0.96f);
@@ -10376,8 +10555,7 @@ class Renderer {
             // Expanded Mode. Order must match ActiveTabCount()/FileTrayTabIndex().
             std::vector<int> activeTabs;
             activeTabs.push_back(3); // Time (shown first when the island expands/on hover)
-            activeTabs.push_back(0); // Calendar
-            if (settings.weather) activeTabs.push_back(1);
+            activeTabs.push_back(0); // Date & Weather (calendar alone when Weather is off)
             if (settings.hardwareMonitorModule) activeTabs.push_back(2);
             if (settings.fileTrayModule) activeTabs.push_back(4);
             if (g_activityTabVisible.load(std::memory_order_relaxed)) activeTabs.push_back(5); // Activity
@@ -10389,8 +10567,10 @@ class Renderer {
 
             if (activeTabId == 5) DrawActivityDashboard(state, rect);
             else if (activeTabId == 3) DrawTimeDashboard(state, rect, settings, now, scale, local);
-            else if (activeTabId == 0) DrawCalendarDashboard(state, rect, settings, now, scale, local);
-            else if (activeTabId == 1) DrawWeatherDashboard(state, rect, settings, now, scale, hasWeather, wIcon, wText);
+            else if (activeTabId == 0) {
+                if (settings.weather) DrawDateWeatherDashboard(state, rect, settings, now, scale, local, hasWeather, wText);
+                else DrawCalendarDashboard(state, rect, settings, now, scale, local);
+            }
             else if (activeTabId == 2) DrawHardwareMonitorDashboard(state, rect, settings, scale);
             else if (activeTabId == 4) DrawFileTrayDashboard(state, rect, settings, scale);
 
@@ -10665,8 +10845,7 @@ class Renderer {
             // Order must match ActiveTabCount()/FileTrayTabIndex().
             std::vector<int> activeTabs;
             activeTabs.push_back(0); // Media
-            activeTabs.push_back(1); // Calendar
-            if (settings.weather) activeTabs.push_back(2);
+            activeTabs.push_back(1); // Date & Weather (calendar alone when Weather is off)
             if (settings.hardwareMonitorModule) activeTabs.push_back(3);
             if (settings.fileTrayModule) activeTabs.push_back(4);
             if (g_activityTabVisible.load(std::memory_order_relaxed)) activeTabs.push_back(5); // Activity
@@ -10835,15 +11014,17 @@ class Renderer {
                                   now);
             } else if (activeTabId == 1) {
                 SYSTEMTIME local = {}; GetLocalTime(&local);
-                DrawCalendarDashboard(state, rect, settings, now, 1.0f, local);
-            } else if (activeTabId == 2) {
-                bool hasWeather = state.weather.hasData && (now - state.weather.lastUpdated < 3600.0);
-                std::wstring wIcon = L"🌡️"; std::wstring wText = Loc(L"Loading...");
-                if (hasWeather) {
-                    wText = state.weather.weatherDesc;
-                    GetWeatherIconAndText(state.weather.weatherCode, wIcon, wText);
+                if (settings.weather) {
+                    bool hasWeather = state.weather.hasData && (now - state.weather.lastUpdated < 3600.0);
+                    std::wstring wIcon = L"🌡️"; std::wstring wText = Loc(L"Loading...");
+                    if (hasWeather) {
+                        wText = state.weather.weatherDesc;
+                        GetWeatherIconAndText(state.weather.weatherCode, wIcon, wText);
+                    }
+                    DrawDateWeatherDashboard(state, rect, settings, now, 1.0f, local, hasWeather, wText);
+                } else {
+                    DrawCalendarDashboard(state, rect, settings, now, 1.0f, local);
                 }
-                DrawWeatherDashboard(state, rect, settings, now, 1.0f, hasWeather, wIcon, wText);
             } else if (activeTabId == 3) {
                 DrawHardwareMonitorDashboard(state, rect, settings, 1.0f);
             } else if (activeTabId == 4) {
