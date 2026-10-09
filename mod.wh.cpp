@@ -596,13 +596,15 @@ namespace MediaLayout {
     constexpr float kMinimizeButtonOffsetX = -118.0f;
     constexpr float kMinimizeButtonRadius = 13.0f;
 
-    // The minimized island: a thin glass line. Too thin to hover precisely,
-    // so the hover target is padded out sideways and below it (and runs up to
-    // the window top).
+    // The minimized island: a thin glass line. Its hover target is the line
+    // itself, padded only slightly (and running up to the screen edge so the
+    // cursor can be thrown against it). Minimizing is meant to keep the island
+    // out of the way, so the target stays small enough that a cursor working
+    // near the top of the screen does not open it by accident.
     constexpr float kMinimizedLineWidth = 160.0f;
     constexpr float kMinimizedLineHeight = 8.0f;
-    constexpr float kMinimizedHoverPadX = 40.0f;
-    constexpr float kMinimizedHoverPadBelow = 16.0f;
+    constexpr float kMinimizedHoverPadX = 4.0f;
+    constexpr float kMinimizedHoverPadBelow = 4.0f;
     // The line tucks up against the screen edge (the bottom edge for the
     // bottom positions), leaving just this gap.
     constexpr float kMinimizedLineEdgeGap = 3.0f;
@@ -13157,7 +13159,8 @@ DWORD WINAPI RenderThreadProc(void*) {
             // (still) that small the hover target is padded out around it and
             // runs up to the window top. Once it has opened, the card itself is
             // the target again, so leaving the card closes it back down.
-            if (g_islandMinimized.load(std::memory_order_relaxed) && heightSpring.value < 30.0f) {
+            const bool lineResting = g_islandMinimized.load(std::memory_order_relaxed) && heightSpring.value < 30.0f;
+            if (lineResting) {
                 const int padX = static_cast<int>(std::round(MediaLayout::kMinimizedHoverPadX * g_settings.sizeScale));
                 const int padBelow = static_cast<int>(std::round(MediaLayout::kMinimizedHoverPadBelow * g_settings.sizeScale));
                 pillRect.left -= padX;
