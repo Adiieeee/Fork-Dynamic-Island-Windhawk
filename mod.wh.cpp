@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.5.0
+// @version         1.6.0
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -58,6 +58,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 
 - **Hover & Scroll:** Hover over the island to seamlessly expand it. Use your mouse scroll wheel to swipe between the Media, Calendar, Weather, Hardware Monitor, and File Tray tabs.
 - **File Tray:** Enable the File Tray module, then drag files onto the island. It jumps to the shelf to confirm the drop. Click a row to open that file; right-click the island to clear the shelf.
+- **Alerts while music plays:** Volume, clipboard, Caps Lock, notifications, battery, USB, Bluetooth and Do Not Disturb alerts appear inside the media pill, between the album art and the waveform (briefly replacing the lyric line), and the pill stretches to fit them. A running focus timer or progress task gets its own Activity tab at the end of the scroll loop instead.
 - **Minimize:** The button left of "previous" on the media card tucks the island away into a thin glass line with a faint live waveform. Hover the line to open the full island; click the button again to bring the normal pill back. Alerts such as volume or notifications still pop out while minimized.
 - **Right-Click Menu:** Right-click the island to access Theme presets, Transparency settings, and to pin the island open.
 - **⚠️ Right-click choices are per-session:** The right-click menu is a quick way to try things out, not a place to configure the mod. **Theme**, **shape style** (Pill / Notch / Windows 11) and **pin open** are all re-applied from your Windhawk settings whenever the mod restarts — so a reboot, a mod update, or toggling the mod off and on will discard them. Anything you want to keep, set in the **Mod Settings** tab instead. (Transparency and Expand-on-hover do persist, but the settings tab is still the reliable place for them.)
@@ -613,6 +614,19 @@ namespace MediaLayout {
     // the waveform. ActivityForKind picks one; the width spring animates it.
     constexpr float kCollapsedWidth = 150.0f;
     constexpr float kCollapsedLyricsWidth = 320.0f;
+
+    // Short alerts drawn inside the collapsed media pill. The pill is sized to
+    // the alert: the space DrawMedia keeps for the art on the left and the
+    // waveform on the right (plus the privacy-dot shift), the alert row, and a
+    // little breathing room, capped at kInlineAlertMaxWidth.
+    constexpr float kCollapsedLeftReserve = 48.0f;   // art inset 6 + art 32 + gap 10
+    constexpr float kCollapsedRightReserve = 52.0f;  // waveform 42 + gap 10
+    constexpr float kCollapsedPrivacyShift = 22.0f;
+    constexpr float kInlineAlertPad = 6.0f;
+    constexpr float kInlineAlertIconSize = 18.0f;
+    constexpr float kInlineAlertGap = 8.0f;
+    constexpr float kInlineAlertBarWidth = 56.0f;
+    constexpr float kInlineAlertMaxWidth = 460.0f;
 
     // Expanded-layout album art, as drawn by DrawMedia.
     constexpr float kArtInsetX = 24.0f;
@@ -1322,6 +1336,10 @@ std::atomic<bool> g_islandMinimized = false;
 std::atomic<float> g_minimizedEdgeFraction = 0.0f;
 std::atomic<bool> g_running = false;
 std::atomic<int> g_idleTab = 0;
+// True while the focus timer or a progress task is running. They then get an
+// "Activity" tab at the end of the expanded scroll loop instead of a pill of
+// their own next to the media pill. Updated every frame by RenderThreadProc.
+std::atomic<bool> g_activityTabVisible = false;
 std::atomic<bool> g_layoutDirty = true;
 std::atomic<bool> g_clickExpanded = false;
 std::atomic<int> g_pressedMediaButton = -1;
@@ -1390,6 +1408,7 @@ int ActiveTabCount(const Settings& settings) {
     if (settings.weather) ++count;
     if (settings.hardwareMonitorModule) ++count;
     if (settings.fileTrayModule) ++count;
+    if (g_activityTabVisible.load(std::memory_order_relaxed)) ++count;
     return count;
 }
 
@@ -1399,7 +1418,7 @@ int NormalizedTabIndex(const Settings& settings) {
     return ((raw % total) + total) % total;
 }
 
-// Tab order is always: primary, calendar, weather?, hardware?, file tray?
+// Tab order is always: primary, calendar, weather?, hardware?, file tray?, activity?
 // The expensive GPU / network counters are only sampled while the hardware card
 // is actually on screen, so that check needs the card's real index rather than
 // assuming it is the last tab -- which stopped being true once the File Tray
@@ -1416,6 +1435,15 @@ int FileTrayTabIndex(const Settings& settings) {
         return -1;
     }
     return 2 + (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0);
+}
+
+// The Activity tab (focus timer / progress) is always last, so it appearing and
+// disappearing never shifts the index of any other tab.
+int ActivityTabIndex(const Settings& settings) {
+    if (!g_activityTabVisible.load(std::memory_order_relaxed)) {
+        return -1;
+    }
+    return ActiveTabCount(settings) - 1;
 }
 
 // ── Localization (#35) ───────────────────────────────────────────────────────
@@ -4302,7 +4330,7 @@ DWORD WINAPI NotificationThreadProc(void*) {
 
                             NotificationSnapshot snapshot;
                             snapshot.active = true;
-                            snapshot.expiresAt = NowSeconds() + 4.0;
+                            snapshot.expiresAt = NowSeconds() + 3.0;
                             auto appInfo = userNotification.AppInfo();
                             auto displayInfo = appInfo.DisplayInfo();
                             snapshot.app = displayInfo.DisplayName().c_str();
@@ -4664,7 +4692,7 @@ void HandleBluetoothConnected(
     snapshot.connected = true;
     snapshot.deviceName = name;
     snapshot.category = category;
-    snapshot.expiresAt = NowSeconds() + 4.0;
+    snapshot.expiresAt = NowSeconds() + 3.0;
     snapshot.batteryPercent = g_settings.bluetoothShowBattery
         ? TryReadBluetoothBatteryPercent(info.Id())
         : -1;
@@ -4738,7 +4766,7 @@ void HandleBluetoothDisconnected(
     snapshot.deviceName = name;
     snapshot.category = category;
     snapshot.batteryPercent = GetLastKnownBluetoothBatteryPercent(std::wstring(id.c_str()));
-    snapshot.expiresAt = NowSeconds() + 4.0;
+    snapshot.expiresAt = NowSeconds() + 3.0;
 
     {
         std::lock_guard lock(g_stateMutex);
@@ -5987,7 +6015,7 @@ void UpdateBatterySnapshot() {
 
         if (triggerAlert) {
             g_state.battery.active = true;
-            g_state.battery.expiresAt = NowSeconds() + 4.0;
+            g_state.battery.expiresAt = NowSeconds() + 3.0;
         }
     }
 
@@ -6554,7 +6582,7 @@ void CaptureShellNotification(HWND hwnd) {
     notification.active = true;
     notification.app = L"Notification";
     notification.title = title;
-    notification.expiresAt = NowSeconds() + 4.0;
+    notification.expiresAt = NowSeconds() + 3.0;
     // Fetch a 64px icon to ensure crisp rendering inside the pill
     notification.icon = GetWindowIconPixels(hwnd, 64);
 
@@ -7364,6 +7392,24 @@ struct MarqueeLayoutCache {
     DWRITE_TEXT_METRICS metrics{};
 };
 
+// One row of an alert drawn inside the media pill: icon, bright primary text,
+// an optional level bar, and a muted (or coloured) secondary value. Built once
+// by Renderer::BuildInlineAlertContent and used both to size the pill and to
+// paint it, so the two can never disagree.
+struct InlineAlertContent {
+    enum class Icon { Glyph, NotificationIcon, ClipboardImage, ClipboardAppIcon, Keycap, Battery, Ring };
+    Icon icon = Icon::Glyph;
+    std::wstring glyph;        // Glyph: icon-font character; Keycap: the key's letter
+    std::wstring primary;
+    std::wstring secondary;
+    bool hasSecondaryColor = false;
+    D2D1_COLOR_F secondaryColor{};
+    bool hasBar = false;
+    float barValue = 0.0f;
+    bool barMuted = false;
+    D2D1_COLOR_F iconColor = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f);  // Battery fill / Ring stroke
+};
+
 // Measured geometry of the collapsed idle strip, produced by
 // Renderer::MeasureIdleStrip. The render loop uses totalWidth to size the
 // island; DrawIdleDashboard uses the per-slot widths to place the clock, divider
@@ -7521,6 +7567,24 @@ class Renderer {
     // Set by the render loop each frame, before Render().
     void SetMinimizedLine(bool minimizedLine) {
         minimizedLine_ = minimizedLine;
+    }
+
+    // Set by the render loop each frame, before Render(): the short alert to
+    // draw inside the collapsed media pill, or IslandKind::Idle for none.
+    void SetInlineAlert(IslandKind kind) {
+        inlineAlert_ = kind;
+    }
+
+    // Collapsed media pill width (in unscaled content units, like
+    // ActivityForKind) that fits `kind` between the art and the waveform.
+    float MeasureInlineAlert(const SharedState& state, IslandKind kind, const Settings& settings) {
+        EnsureTextFormats(settings.sizeScale, settings.fontFamily, settings.textScale);
+        const InlineAlertContent content = BuildInlineAlertContent(state, kind, settings);
+        const float reserve = CollapsedMediaReserve(state);
+        const float maxRow = MediaLayout::kInlineAlertMaxWidth - reserve - MediaLayout::kInlineAlertPad * 2.0f;
+        const float row = InlineAlertRowWidth(content, maxRow, nullptr);
+        return Clamp(reserve + MediaLayout::kInlineAlertPad * 2.0f + row,
+                     MediaLayout::kCollapsedWidth, MediaLayout::kInlineAlertMaxWidth);
     }
 
     void Shutdown() {
@@ -9812,13 +9876,15 @@ class Renderer {
             if (settings.weather) activeTabs.push_back(1);
             if (settings.hardwareMonitorModule) activeTabs.push_back(2);
             if (settings.fileTrayModule) activeTabs.push_back(4);
+            if (g_activityTabVisible.load(std::memory_order_relaxed)) activeTabs.push_back(5); // Activity
 
             int maxTabs = static_cast<int>(activeTabs.size());
             int tabIdx = NormalizedTabIndex(settings);
             if (tabIdx >= maxTabs) tabIdx = maxTabs - 1;
             int activeTabId = activeTabs[tabIdx];
 
-            if (activeTabId == 3) DrawTimeDashboard(state, rect, settings, now, scale, local);
+            if (activeTabId == 5) DrawActivityDashboard(state, rect);
+            else if (activeTabId == 3) DrawTimeDashboard(state, rect, settings, now, scale, local);
             else if (activeTabId == 0) DrawCalendarDashboard(state, rect, settings, now, scale, local);
             else if (activeTabId == 1) DrawWeatherDashboard(state, rect, settings, now, scale, hasWeather, wIcon, wText);
             else if (activeTabId == 2) DrawHardwareMonitorDashboard(state, rect, settings, scale);
@@ -10099,6 +10165,7 @@ class Renderer {
             if (settings.weather) activeTabs.push_back(2);
             if (settings.hardwareMonitorModule) activeTabs.push_back(3);
             if (settings.fileTrayModule) activeTabs.push_back(4);
+            if (g_activityTabVisible.load(std::memory_order_relaxed)) activeTabs.push_back(5); // Activity
 
             // Same settings object as the list above, so the index can't be
             // normalised against a tab set that no longer matches.
@@ -10277,6 +10344,8 @@ class Renderer {
                 DrawHardwareMonitorDashboard(state, rect, settings, 1.0f);
             } else if (activeTabId == 4) {
                 DrawFileTrayDashboard(state, rect, settings, 1.0f);
+            } else if (activeTabId == 5) {
+                DrawActivityDashboard(state, rect);
             }
 
             // Pagination dots (Vertical on the right edge)
@@ -10337,11 +10406,369 @@ class Renderer {
                 }
             }
 
-            DrawCollapsedLyrics(state, D2D1::RectF(artRect.right + 10.0f, rect.top,
-                                                   waveRect.left - 10.0f, rect.bottom), now);
+            const D2D1_RECT_F middle = D2D1::RectF(artRect.right + 10.0f, rect.top,
+                                                   waveRect.left - 10.0f, rect.bottom);
+            if (inlineAlert_ != IslandKind::Idle) {
+                // A short alert takes the lyric's place while it lasts. Forget
+                // the shown line so the lyric comes back without a crossfade
+                // from whatever was showing before the alert.
+                lyricShownKey_.clear();
+                DrawInlineAlert(state, middle, settings);
+            } else {
+                DrawCollapsedLyrics(state, middle, now);
+            }
 
             target_->PopLayer();
         }
+    }
+
+    // ── Alerts inside the collapsed media pill ───────────────────────────────
+
+    // Width DrawMedia's collapsed layout keeps for the art and the waveform.
+    float CollapsedMediaReserve(const SharedState& state) const {
+        return MediaLayout::kCollapsedLeftReserve + MediaLayout::kCollapsedRightReserve +
+               ((state.system.micActive || state.system.cameraActive) ? MediaLayout::kCollapsedPrivacyShift : 0.0f);
+    }
+
+    float MeasureTextWidth(const std::wstring& text, IDWriteTextFormat* fmt) {
+        if (text.empty() || !fmt || !dwriteFactory_) {
+            return 0.0f;
+        }
+        ComPtr<IDWriteTextLayout> layout;
+        if (FAILED(dwriteFactory_->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), fmt,
+                                                    4000.0f, 100.0f, &layout)) || !layout) {
+            return 0.0f;
+        }
+        layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        DWRITE_TEXT_METRICS metrics{};
+        layout->GetMetrics(&metrics);
+        return std::ceil(metrics.widthIncludingTrailingWhitespace);
+    }
+
+    // Width of the alert row. A primary text too long for maxRow is cut down
+    // (and drawn with an ellipsis); *primaryWidth receives the width it gets.
+    float InlineAlertRowWidth(const InlineAlertContent& content, float maxRow, float* primaryWidth) {
+        const float gap = MediaLayout::kInlineAlertGap;
+        float row = MediaLayout::kInlineAlertIconSize;
+        if (content.hasBar) {
+            row += gap + MediaLayout::kInlineAlertBarWidth;
+        }
+        const float secondaryW = MeasureTextWidth(content.secondary, smallTextFormat_.Get());
+        if (secondaryW > 0.0f) {
+            row += gap + secondaryW;
+        }
+        float primaryW = MeasureTextWidth(content.primary, textFormat_.Get());
+        if (primaryW > 0.0f) {
+            primaryW = std::min(primaryW, std::max(24.0f, maxRow - row - gap));
+            row += gap + primaryW;
+        }
+        if (primaryWidth) {
+            *primaryWidth = primaryW;
+        }
+        return row;
+    }
+
+    InlineAlertContent BuildInlineAlertContent(const SharedState& state, IslandKind kind, const Settings& settings) {
+        using Icon = InlineAlertContent::Icon;
+        InlineAlertContent c;
+        const D2D1_COLOR_F green = D2D1::ColorF(0.19f, 0.83f, 0.38f, 1.0f);
+        const D2D1_COLOR_F red = D2D1::ColorF(1.0f, 0.27f, 0.22f, 1.0f);
+        auto setSecondaryColor = [&](D2D1_COLOR_F color) {
+            c.hasSecondaryColor = true;
+            c.secondaryColor = color;
+        };
+
+        switch (kind) {
+            case IslandKind::Clipboard: {
+                if (state.clipboard.image && !state.clipboard.imagePreview.bgra.empty()) {
+                    c.icon = Icon::ClipboardImage;
+                } else if (!state.clipboard.appIcon.bgra.empty()) {
+                    c.icon = Icon::ClipboardAppIcon;
+                } else {
+                    c.glyph = state.clipboard.image ? (usingFluentIcons_ ? L"" : L"")
+                                                    : (usingFluentIcons_ ? L"" : L"");
+                }
+                // First line of what was copied, as one tidy line.
+                std::wstring text = state.clipboard.text.substr(0, state.clipboard.text.find_first_of(L"\r\n"));
+                std::replace(text.begin(), text.end(), L'\t', L' ');
+                while (!text.empty() && iswspace(text.back())) text.pop_back();
+                size_t lead = 0;
+                while (lead < text.size() && iswspace(text[lead])) ++lead;
+                text.erase(0, lead);
+                if (text.empty()) {
+                    text = state.clipboard.image ? std::wstring(L"Image copied") : std::wstring(Loc(L"Copied"));
+                }
+                c.primary = text;
+                c.secondary = state.clipboard.appName;
+                break;
+            }
+            case IslandKind::Notification:
+                if (!state.notification.icon.bgra.empty()) {
+                    c.icon = Icon::NotificationIcon;
+                } else {
+                    c.glyph = usingFluentIcons_ ? L"" : L"";
+                }
+                c.primary = !state.notification.title.empty() ? state.notification.title
+                          : !state.notification.body.empty()  ? state.notification.body
+                                                              : std::wstring(L"Notification");
+                c.secondary = state.notification.app;
+                break;
+            case IslandKind::Volume: {
+                const bool muted = state.volume.muted || state.volume.percent == 0;
+                c.glyph = muted ? L"" : (usingFluentIcons_ ? L"" : L"");
+                c.hasBar = true;
+                c.barValue = Clamp(state.volume.percent / 100.0f, 0.0f, 1.0f);
+                c.barMuted = muted;
+                if (muted) {
+                    c.secondary = Loc(L"Muted");
+                } else {
+                    c.secondary = std::to_wstring(state.volume.percent) + L"%";
+                }
+                break;
+            }
+            case IslandKind::CapsLock: {
+                const bool num = state.capsLock.isNumEvent;
+                const bool on = num ? state.capsLock.numOn : state.capsLock.capsOn;
+                c.icon = Icon::Keycap;
+                c.glyph = num ? L"1" : L"A";
+                c.primary = num ? Loc(L"Num Lock") : Loc(L"Caps Lock");
+                c.secondary = on ? Loc(L"On") : Loc(L"Off");
+                if (on) setSecondaryColor(green);
+                break;
+            }
+            case IslandKind::BatteryLow:
+                c.icon = Icon::Battery;
+                c.barValue = Clamp(state.battery.percent / 100.0f, 0.0f, 1.0f);
+                c.iconColor = state.battery.low ? red : (state.battery.charging ? green : D2D1::ColorF(1, 1, 1, 0.95f));
+                c.primary = state.battery.charging ? Loc(L"Charging") : L"Battery";
+                c.secondary = std::to_wstring(state.battery.percent) + L"%";
+                if (state.battery.low) setSecondaryColor(red);
+                break;
+            case IslandKind::Device: {
+                const bool connected = state.device.eventType == DeviceEventType::Connected;
+                c.glyph = usingFluentIcons_ ? L"" : L"";
+                c.primary = !state.device.deviceName.empty() ? state.device.deviceName
+                          : state.device.isBluetoothLike     ? std::wstring(L"Bluetooth")
+                                                             : std::wstring(L"USB Device");
+                c.secondary = connected ? Loc(L"Connected") : L"Removed";
+                setSecondaryColor(connected ? green : red);
+                break;
+            }
+            case IslandKind::Bluetooth: {
+                const bool connected = state.bluetoothDevice.connected;
+                switch (state.bluetoothDevice.category) {
+                    case BluetoothDeviceCategory::Headphones: c.glyph = L""; break;
+                    case BluetoothDeviceCategory::Speaker: c.glyph = L""; break;
+                    case BluetoothDeviceCategory::Mouse: c.glyph = L""; break;
+                    case BluetoothDeviceCategory::Keyboard: c.glyph = L""; break;
+                    case BluetoothDeviceCategory::Phone: c.glyph = L""; break;
+                    default: c.glyph = L""; break;
+                }
+                c.primary = state.bluetoothDevice.deviceName.empty() ? std::wstring(L"Bluetooth Device")
+                                                                     : state.bluetoothDevice.deviceName;
+                c.secondary = connected ? Loc(L"Connected") : Loc(L"Disconnected");
+                if (connected && settings.bluetoothShowBattery && state.bluetoothDevice.batteryPercent >= 0) {
+                    c.secondary += L"  ·  " + std::to_wstring(state.bluetoothDevice.batteryPercent) + L"%";
+                }
+                setSecondaryColor(connected ? green : red);
+                break;
+            }
+            case IslandKind::DoNotDisturb: {
+                const bool on = state.doNotDisturb.enabled;
+                c.glyph = on ? L"" : L"";
+                c.primary = Loc(L"Do Not Disturb");
+                c.secondary = on ? Loc(L"On") : Loc(L"Off");
+                if (on) setSecondaryColor(green);
+                break;
+            }
+            case IslandKind::Timer:
+                c.icon = Icon::Ring;
+                c.iconColor = state.timer.isBreak ? green : D2D1::ColorF(1.0f, 0.58f, 0.0f, 1.0f);
+                c.primary = state.timer.isBreak ? L"Break Complete" : L"Focus Complete";
+                break;
+            default:
+                break;
+        }
+        return c;
+    }
+
+    // Draws `text` vertically centred on cy, at most maxWidth wide (ellipsis
+    // past that).
+    void DrawTrimmedText(const std::wstring& text, IDWriteTextFormat* fmt, float x, float cy,
+                         float maxWidth, ID2D1Brush* brush) {
+        if (text.empty() || !fmt || !brush || maxWidth <= 1.0f) {
+            return;
+        }
+        ComPtr<IDWriteTextLayout> layout;
+        if (FAILED(dwriteFactory_->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), fmt,
+                                                    maxWidth + 1.0f, 100.0f, &layout)) || !layout) {
+            return;
+        }
+        layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        ComPtr<IDWriteInlineObject> ellipsis;
+        if (SUCCEEDED(dwriteFactory_->CreateEllipsisTrimmingSign(fmt, &ellipsis)) && ellipsis) {
+            DWRITE_TRIMMING trimming = {DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+            layout->SetTrimming(&trimming, ellipsis.Get());
+        }
+        DWRITE_TEXT_METRICS metrics{};
+        layout->GetMetrics(&metrics);
+        target_->DrawTextLayout(D2D1::Point2F(x, cy - metrics.height * 0.5f), layout.Get(), brush,
+                                D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+
+    void DrawInlineAlertIcon(const InlineAlertContent& c, const SharedState& state, D2D1_RECT_F box) {
+        using Icon = InlineAlertContent::Icon;
+        const D2D1_POINT_2F center = D2D1::Point2F((box.left + box.right) * 0.5f, (box.top + box.bottom) * 0.5f);
+        switch (c.icon) {
+            case Icon::NotificationIcon:
+                DrawRoundedBitmapPixels(state.notification.icon, box, 5.0f, notificationIconBitmap_,
+                                        notificationIconGeneration_, 1.0f);
+                return;
+            case Icon::ClipboardImage:
+                DrawCoverFitBitmapPixels(state.clipboard.imagePreview, box, 4.0f, clipboardImageBitmap_,
+                                         clipboardImageGeneration_, 1.0f);
+                return;
+            case Icon::ClipboardAppIcon:
+                DrawRoundedBitmapPixels(state.clipboard.appIcon, box, 5.0f, clipboardIconBitmap_,
+                                        clipboardIconGeneration_, 0.96f);
+                return;
+            default:
+                break;
+        }
+
+        ComPtr<ID2D1SolidColorBrush> brush;
+        target_->CreateSolidColorBrush(c.iconColor, &brush);
+        if (!brush) {
+            return;
+        }
+
+        if (c.icon == Icon::Keycap) {
+            brush->SetColor(material_.raisedStrong);
+            target_->FillRoundedRectangle(D2D1::RoundedRect(box, 4.0f, 4.0f), brush.Get());
+            IDWriteTextFormat* fmt = smallTextFormat_.Get();
+            if (fmt) {
+                const DWRITE_TEXT_ALIGNMENT oldAlign = fmt->GetTextAlignment();
+                const DWRITE_PARAGRAPH_ALIGNMENT oldPara = fmt->GetParagraphAlignment();
+                fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                target_->DrawTextW(c.glyph.c_str(), static_cast<UINT32>(c.glyph.size()), fmt, box,
+                                   textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                fmt->SetTextAlignment(oldAlign);
+                fmt->SetParagraphAlignment(oldPara);
+            }
+        } else if (c.icon == Icon::Battery) {
+            const D2D1_RECT_F body = D2D1::RectF(center.x - 8.0f, center.y - 4.5f, center.x + 6.0f, center.y + 4.5f);
+            ComPtr<ID2D1SolidColorBrush> outline;
+            target_->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 0.80f), &outline);
+            if (outline) {
+                target_->DrawRoundedRectangle(D2D1::RoundedRect(body, 1.5f, 1.5f), outline.Get(), 1.2f);
+                target_->FillRectangle(D2D1::RectF(body.right, center.y - 2.0f, body.right + 1.8f, center.y + 2.0f),
+                                       outline.Get());
+            }
+            const float fillW = (body.right - body.left - 3.0f) * c.barValue;
+            if (fillW > 0.3f) {
+                target_->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(body.left + 1.5f, body.top + 1.5f, body.left + 1.5f + fillW,
+                                                  body.bottom - 1.5f), 0.8f, 0.8f),
+                    brush.Get());
+            }
+        } else if (c.icon == Icon::Ring) {
+            target_->DrawEllipse(D2D1::Ellipse(center, 6.5f, 6.5f), brush.Get(), 2.2f);
+        } else {
+            IDWriteTextFormat* fmt = mediaNavIconFormat_.Get();
+            if (fmt && !c.glyph.empty()) {
+                // A little larger than the box so the glyph's side bearings are
+                // not clipped; it is centred either way.
+                const D2D1_RECT_F glyphBox = D2D1::RectF(box.left - 4.0f, box.top - 4.0f, box.right + 4.0f, box.bottom + 4.0f);
+                const DWRITE_TEXT_ALIGNMENT oldAlign = fmt->GetTextAlignment();
+                const DWRITE_PARAGRAPH_ALIGNMENT oldPara = fmt->GetParagraphAlignment();
+                fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                target_->DrawTextW(c.glyph.c_str(), static_cast<UINT32>(c.glyph.size()), fmt, glyphBox,
+                                   textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+                fmt->SetTextAlignment(oldAlign);
+                fmt->SetParagraphAlignment(oldPara);
+            }
+        }
+    }
+
+    // The alert row, centred between the art and the waveform. It fades in
+    // as the width spring opens the pill up to fit it, the same way the
+    // lyric line does, so it never overlaps the art or the waveform.
+    void DrawInlineAlert(const SharedState& state, D2D1_RECT_F area, const Settings& settings) {
+        const InlineAlertContent c = BuildInlineAlertContent(state, inlineAlert_, settings);
+        const float available = area.right - area.left;
+        const float maxRow = MediaLayout::kInlineAlertMaxWidth - CollapsedMediaReserve(state) -
+                             MediaLayout::kInlineAlertPad * 2.0f;
+        float primaryW = 0.0f;
+        const float row = InlineAlertRowWidth(c, maxRow, &primaryW);
+        const float alpha = Clamp((available - row + 20.0f) / 20.0f, 0.0f, 1.0f);
+        if (alpha <= 0.01f) {
+            return;
+        }
+
+        ComPtr<ID2D1Layer> layer;
+        if (FAILED(target_->CreateLayer(nullptr, &layer)) || !layer) {
+            return;
+        }
+        target_->PushLayer(D2D1::LayerParameters(area, nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                 D2D1::IdentityMatrix(), alpha),
+                           layer.Get());
+
+        const float gap = MediaLayout::kInlineAlertGap;
+        const float iconSize = MediaLayout::kInlineAlertIconSize;
+        const float cy = (area.top + area.bottom) * 0.5f;
+        float x = area.left + std::max(0.0f, (available - row) * 0.5f);
+
+        DrawInlineAlertIcon(c, state, D2D1::RectF(x, cy - iconSize * 0.5f, x + iconSize, cy + iconSize * 0.5f));
+        x += iconSize;
+
+        if (primaryW > 0.0f) {
+            x += gap;
+            textBrush_->SetOpacity(0.96f);
+            DrawTrimmedText(c.primary, textFormat_.Get(), x, cy, primaryW, textBrush_.Get());
+            x += primaryW;
+        }
+
+        if (c.hasBar) {
+            x += gap;
+            const D2D1_RECT_F track = D2D1::RectF(x, cy - 2.0f, x + MediaLayout::kInlineAlertBarWidth, cy + 2.0f);
+            if (c.barMuted) {
+                ComPtr<ID2D1SolidColorBrush> trackBrush;
+                ComPtr<ID2D1SolidColorBrush> dim;
+                target_->CreateSolidColorBrush(material_.raisedStrong, &trackBrush);
+                target_->CreateSolidColorBrush(WithAlpha(material_.textSecondary, 0.35f), &dim);
+                if (trackBrush && dim) {
+                    target_->FillRoundedRectangle(D2D1::RoundedRect(track, 2.0f, 2.0f), trackBrush.Get());
+                    target_->FillRoundedRectangle(
+                        D2D1::RoundedRect(D2D1::RectF(track.left, track.top,
+                                                      track.left + (track.right - track.left) * c.barValue,
+                                                      track.bottom), 2.0f, 2.0f),
+                        dim.Get());
+                }
+            } else {
+                DrawAccentTrack(track, c.barValue, 2.0f);
+                accentBrush_->SetOpacity(1.0f);
+            }
+            x += MediaLayout::kInlineAlertBarWidth;
+        }
+
+        if (!c.secondary.empty()) {
+            x += gap;
+            ComPtr<ID2D1SolidColorBrush> secondaryBrush;
+            if (c.hasSecondaryColor) {
+                target_->CreateSolidColorBrush(c.secondaryColor, &secondaryBrush);
+            }
+            mutedBrush_->SetOpacity(0.80f);
+            DrawTrimmedText(c.secondary, smallTextFormat_.Get(), x, cy, area.right - x,
+                            secondaryBrush ? static_cast<ID2D1Brush*>(secondaryBrush.Get()) : mutedBrush_.Get());
+            mutedBrush_->SetOpacity(0.75f);
+        }
+
+        textBrush_->SetOpacity(0.96f);
+        target_->PopLayer();
     }
 
     // The lyric line being sung, between the art and the waveform on the
@@ -11119,7 +11546,7 @@ class Renderer {
     void DrawNotification(const SharedState& state, D2D1_RECT_F rect) {
         if (rect.bottom - rect.top < 48.0f || rect.right - rect.left < 120.0f) return;
         const double now = NowSeconds();
-        const float ttl = 4.0f;
+        const float ttl = 3.0f;
         const float remaining = Clamp(static_cast<float>(state.notification.expiresAt - now), 0.0f, ttl);
         const float progress = remaining / ttl;
 
@@ -11259,6 +11686,94 @@ class Renderer {
         }
         accentBrush_->SetOpacity(1.0f);
         mutedBrush_->SetOpacity(0.58f);
+    }
+
+    // Expanded "Activity" tab: the running focus timer and/or progress task,
+    // which no longer take a pill of their own next to the media pill (they
+    // would sit there for minutes and crowd out the lyrics).
+    void DrawActivityDashboard(const SharedState& state, D2D1_RECT_F rect) {
+        const double now = NowSeconds();
+        const float cy = (rect.top + rect.bottom) * 0.5f;
+        const float barLeft = rect.left + 48.0f;
+        const float barRight = rect.right - 48.0f;
+
+        IDWriteTextFormat* bigFmt = timeDashboardFormat_ ? timeDashboardFormat_.Get() : hugeTextFormat_.Get();
+        IDWriteTextFormat* labelFmt = dateDashboardFormat_ ? dateDashboardFormat_.Get() : boldTextFormat_.Get();
+
+        auto drawCentered = [&](const std::wstring& text, IDWriteTextFormat* fmt, D2D1_RECT_F r,
+                                ID2D1Brush* brush) {
+            if (!fmt || text.empty()) return;
+            const DWRITE_TEXT_ALIGNMENT oldAlign = fmt->GetTextAlignment();
+            fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            target_->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmt, r, brush,
+                               D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            fmt->SetTextAlignment(oldAlign);
+        };
+        auto drawBar = [&](float y, float fraction, D2D1_COLOR_F color) {
+            const D2D1_RECT_F track = D2D1::RectF(barLeft, y - 2.5f, barRight, y + 2.5f);
+            ComPtr<ID2D1SolidColorBrush> trackBrush;
+            ComPtr<ID2D1SolidColorBrush> fillBrush;
+            target_->CreateSolidColorBrush(material_.raisedStrong, &trackBrush);
+            target_->CreateSolidColorBrush(color, &fillBrush);
+            if (!trackBrush || !fillBrush) return;
+            target_->FillRoundedRectangle(D2D1::RoundedRect(track, 2.5f, 2.5f), trackBrush.Get());
+            const float w = (barRight - barLeft) * Clamp(fraction, 0.0f, 1.0f);
+            if (w > 0.5f) {
+                target_->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(barLeft, track.top, barLeft + w, track.bottom), 2.5f, 2.5f),
+                    fillBrush.Get());
+            }
+        };
+
+        const bool timerOn = state.timer.active;
+        const bool progressOn = g_settings.progress && state.progress.active;
+
+        if (timerOn) {
+            const double remaining = state.timer.running ? std::max(0.0, state.timer.endsAt - now)
+                                                         : state.timer.remainingAtPause;
+            const int totalSec = state.timer.totalSeconds > 0 ? state.timer.totalSeconds : 1;
+            const float done = Clamp(1.0f - static_cast<float>(remaining / totalSec), 0.0f, 1.0f);
+            const D2D1_COLOR_F color = state.timer.isBreak ? D2D1::ColorF(0.19f, 0.83f, 0.38f, 1.0f)
+                                                           : D2D1::ColorF(1.0f, 0.58f, 0.0f, 1.0f);
+
+            // Shifted up when a progress row has to fit underneath.
+            const float top = progressOn ? cy - 62.0f : cy - 50.0f;
+
+            std::wstring label = state.timer.isBreak ? Loc(L"Break Timer") : Loc(L"Focus Timer");
+            if (!state.timer.running) {
+                label += std::wstring(L"  ·  ") + Loc(L"Paused");
+            }
+            mutedBrush_->SetOpacity(0.80f);
+            drawCentered(label, labelFmt, D2D1::RectF(rect.left, top, rect.right, top + 22.0f), mutedBrush_.Get());
+
+            wchar_t value[32] = {};
+            const int rem = static_cast<int>(std::ceil(remaining));
+            swprintf_s(value, L"%d:%02d", rem / 60, rem % 60);
+            textBrush_->SetOpacity(0.98f);
+            drawCentered(value, bigFmt, D2D1::RectF(rect.left, top + 20.0f, rect.right, top + 76.0f), textBrush_.Get());
+
+            drawBar(top + 86.0f, done, color);
+
+            if (!progressOn) {
+                mutedBrush_->SetOpacity(0.55f);
+                drawCentered(Loc(L"Right-click the island to pause or stop"), smallTextFormat_.Get(),
+                             D2D1::RectF(rect.left, top + 96.0f, rect.right, top + 114.0f), mutedBrush_.Get());
+            }
+        }
+
+        if (progressOn) {
+            const float pct = Clamp(state.progress.percent / 100.0f, 0.0f, 1.0f);
+            wchar_t label[64] = {};
+            swprintf_s(label, L"%s  %d%%", Loc(L"Progress"), state.progress.percent);
+            const float top = timerOn ? cy + 36.0f : cy - 24.0f;
+            textBrush_->SetOpacity(0.92f);
+            drawCentered(label, timerOn ? smallTextFormat_.Get() : labelFmt,
+                         D2D1::RectF(rect.left, top, rect.right, top + 22.0f), textBrush_.Get());
+            drawBar(top + 30.0f, pct, (currentAccent_.a > 0.0f) ? currentAccent_ : D2D1::ColorF(0x4cc9f0));
+        }
+
+        mutedBrush_->SetOpacity(0.58f);
+        textBrush_->SetOpacity(0.90f);
     }
 
     void DrawTimer(const SharedState& state, D2D1_RECT_F rect) {
@@ -11585,7 +12100,7 @@ class Renderer {
     void DrawBluetoothDevice(const SharedState& state, D2D1_RECT_F rect) {
         if (rect.bottom - rect.top < 24.0f || rect.right - rect.left < 140.0f) return;
         const double now = NowSeconds();
-        const float ttl = 4.0f;
+        const float ttl = 3.0f;
         const float remaining = Clamp(static_cast<float>(state.bluetoothDevice.expiresAt - now), 0.0f, ttl);
         const float progress = remaining / ttl;
 
@@ -11864,6 +12379,7 @@ class Renderer {
     double       lastAccentTime_ = -1.0;  // -1 = not yet set (will snap on first frame)
     float        mediaBtnPress_[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};  // prev, play, next, lyrics, minimize
     bool         minimizedLine_ = false;  // set per frame by the render loop
+    IslandKind   inlineAlert_ = IslandKind::Idle;  // set per frame by the render loop
     double       lastMediaBtnTime_ = -1.0;
 };
 
@@ -11943,8 +12459,44 @@ Activity ActivityForKind(IslandKind kind, const Settings& settings, const Shared
     return activity;
 }
 
+// The short-lived alert to show inside the media pill (between the art and the
+// waveform) instead of as a pill of its own, or IslandKind::Idle for none.
+// Same priority order and setting gates as ChooseActivities below. A running
+// timer is not an alert -- it lives on the Activity tab -- but the few seconds
+// after it finishes are.
+IslandKind ChooseInlineAlert(const SharedState& state, const Settings& settings, double now) {
+    if (state.clipboard.active && now < state.clipboard.expiresAt) return IslandKind::Clipboard;
+    if (settings.capsLock && state.capsLock.active && now < state.capsLock.expiresAt) return IslandKind::CapsLock;
+    if (state.device.active && now < state.device.expiresAt) return IslandKind::Device;
+    if (settings.bluetoothIndicator && state.bluetoothDevice.active && now < state.bluetoothDevice.expiresAt) {
+        return IslandKind::Bluetooth;
+    }
+    if (settings.doNotDisturbIndicator && state.doNotDisturb.active && now < state.doNotDisturb.expiresAt) {
+        return IslandKind::DoNotDisturb;
+    }
+    if (settings.volume && state.volume.active && now < state.volume.expiresAt) return IslandKind::Volume;
+    if (state.notification.active && now < state.notification.expiresAt) return IslandKind::Notification;
+    if (settings.battery && state.battery.active && now < state.battery.expiresAt) return IslandKind::BatteryLow;
+    if (settings.timerEnabled && state.timer.justFinished && now < state.timer.finishedExpiresAt) {
+        return IslandKind::Timer;
+    }
+    return IslandKind::Idle;
+}
+
+bool MediaPillShown(const SharedState& state, const Settings& settings) {
+    return settings.media && state.media.available;
+}
+
 std::vector<IslandKind> ChooseActivities(const SharedState& state, const Settings& settings, double now) {
     std::vector<IslandKind> activities;
+
+    // With music on, the media pill is the only pill: short alerts are drawn
+    // inside it (ChooseInlineAlert) and the timer / progress move to the
+    // Activity tab, so nothing sits beside it and crowds out the lyrics.
+    if (MediaPillShown(state, settings)) {
+        activities.push_back(IslandKind::Media);
+        return activities;
+    }
 
     if (state.clipboard.active && now < state.clipboard.expiresAt) {
         activities.push_back(IslandKind::Clipboard);
@@ -13086,7 +13638,7 @@ DWORD WINAPI RenderThreadProc(void*) {
                 g_state.timer.active = false;
                 g_state.timer.running = false;
                 g_state.timer.justFinished = true;
-                g_state.timer.finishedExpiresAt = now + 6.0;
+                g_state.timer.finishedExpiresAt = now + 3.0;
                 timerJustCompleted = true;
             }
             if (g_state.timer.justFinished && now >= g_state.timer.finishedExpiresAt) {
@@ -13128,6 +13680,17 @@ DWORD WINAPI RenderThreadProc(void*) {
         if (kinds.size() >= 2) {
             secondary = ActivityForKind(kinds[1], g_settings, snapshot);
         }
+
+        // Short alert drawn inside the media pill, if any (see ChooseInlineAlert).
+        const IslandKind inlineAlert = (primary.kind == IslandKind::Media)
+                                           ? ChooseInlineAlert(snapshot, g_settings, now)
+                                           : IslandKind::Idle;
+        const bool hasInlineAlert = inlineAlert != IslandKind::Idle;
+        renderer.SetInlineAlert(inlineAlert);
+
+        g_activityTabVisible.store((g_settings.timerEnabled && snapshot.timer.active) ||
+                                       (g_settings.progress && snapshot.progress.active),
+                                   std::memory_order_relaxed);
 
         const bool pinned = Wh_GetIntValue(L"PinnedExpanded", 0) != 0;
 
@@ -13205,6 +13768,7 @@ DWORD WINAPI RenderThreadProc(void*) {
                                  primary.kind == IslandKind::Device ||
                                  primary.kind == IslandKind::Bluetooth ||
                                  primary.kind == IslandKind::DoNotDisturb ||
+                                 hasInlineAlert ||
                                  recentTrackChange);
 
         const bool unhideGraceActive = (now < g_hotkeyUnhideUntil.load());
@@ -13346,6 +13910,11 @@ DWORD WINAPI RenderThreadProc(void*) {
             if (!isFullscreen && (isHoverExpanded || pinned || recentTrackChange)) {
                 primary.width = MediaLayout::kExpandedWidth * g_settings.sizeScale;
                 primary.height = MediaLayout::kExpandedHeight * g_settings.sizeScale;
+            } else if (hasInlineAlert) {
+                // The collapsed pill stretches (or shrinks) to fit the alert
+                // in its middle, replacing the lyric width while it lasts.
+                primary.width = renderer.MeasureInlineAlert(snapshot, inlineAlert, g_settings) *
+                                g_settings.sizeScale;
             }
         }
 
@@ -13599,8 +14168,13 @@ DWORD WINAPI RenderThreadProc(void*) {
         // continuousAnimation: these need one frame per second, not the 1ms timer
         // resolution that continuous animation asks for.
         int shownSecond = -1;
+        // The countdown is also on screen on the Activity tab of an open card.
+        const bool activityTabShown = (isHoverExpanded || pinned) &&
+                                      ActivityTabIndex(g_settings) >= 0 &&
+                                      NormalizedTabIndex(g_settings) == ActivityTabIndex(g_settings);
         const bool timerShown = primary.kind == IslandKind::Timer ||
-                               (secondary && secondary->kind == IslandKind::Timer);
+                               (secondary && secondary->kind == IslandKind::Timer) ||
+                               activityTabShown;
         if (timerShown && snapshot.timer.running) {
             shownSecond = static_cast<int>(std::ceil(snapshot.timer.endsAt - now));
         } else if (primary.kind == IslandKind::Idle && g_settings.showSeconds && !isHidden) {
