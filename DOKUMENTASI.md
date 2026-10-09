@@ -140,7 +140,7 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
    - `ChooseInlineAlert` (±12676) memilih notifikasi yang digambar **di dalam** pill musik (§8).
    - `g_activityTabVisible` = timer atau progress aktif (§10).
 5. **Hover:** rect pill dihitung dari `GetWindowRect`, ditambah padding saat mode minimize (§7). `isHoverExpanded` mengikuti setting Expand-on-hover (atau klik), dan dipaksa `hover` saat minimize.
-6. **Auto-hide / fullscreen video:** `IsForegroundFullscreenVideo` (±3625) dicek tiap 0,5 detik **sebelum** `ChooseInlineAlert` (±14117), lalu menghasilkan `videoSuppressed` (±14112). Setelah itu `isHidden` dan `EnsureTopmost` (tiap 1 detik). Detail: §12 "Fullscreen video".
+6. **Auto-hide / fullscreen video:** `IsForegroundFullscreenVideo` (±3633) dicek tiap 0,5 detik **sebelum** `ChooseInlineAlert` (±14125), lalu menghasilkan `videoSuppressed` (±14120). Setelah itu `isHidden` dan `EnsureTopmost` (tiap 1 detik). Detail: §12 "Fullscreen video".
 7. **Poll sistem tiap 1 detik:** `UpdateSystemSnapshot` (±6124) membaca CPU, RAM, disk, dan level volume. GPU dan jaringan hanya dibaca kalau tab Hardware atau game overlay tampil.
 8. **Ukuran target:**
    - Idle: `MeasureIdleStrip`.
@@ -388,9 +388,9 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
 - **Backdrop:** namespace `Backdrop` (±2598): `SetWindowCompositionAttribute` (undocumented) untuk blur atau acrylic, dengan region dibatasi ke bentuk pill (`ApplyBackdropRegion` ±2860). Diterapkan lewat `WM_APP_APPLY_BACKDROP` (`ApplyBackdropMaterial` ±2641).
 - **Auto-hide:** `AutoHideIdleSeconds` (−1 = sembunyi kecuali ada notifikasi, 0 = tidak pernah, >0 = detik idle), `AutoHideFullscreen` (khusus video, lihat di bawah), `UnhideOnHover` (hook mouse saat di-park). Park berarti `ShowWindow(SW_HIDE)` dan CPU sekitar 0%.
 - **Fullscreen video (1.6.2):** island **hanya** hilang saat fullscreen **video**. Game, browser F11 tanpa video, dan aplikasi fullscreen lain tetap menampilkan island seperti biasa.
-  - `MediaThreadProc` (±4256) menyimpan AUMID **semua** sesi SMTC yang `Playing` ke `g_state.playingMediaSources` tiap 1,5 detik, bukan hanya sesi yang diikuti pill.
-  - `IsForegroundFullscreenVideo` (±3625) bernilai true kalau `IsForegroundFullscreen` (±1984: client rect jendela foreground menutupi monitornya) **dan** jendela itu milik salah satu sumber tersebut. Hasilnya sticky per HWND, jadi video yang di-pause tetap dianggap video sampai keluar fullscreen atau jendela foreground berganti.
-  - `WindowBelongsToMediaSource` (±3562) mencocokkan jendela dengan AUMID lewat tiga cara:
+  - `MediaThreadProc` (±4264) menyimpan AUMID **semua** sesi SMTC yang `Playing` ke `g_state.playingMediaSources` tiap 1,5 detik, bukan hanya sesi yang diikuti pill.
+  - `IsForegroundFullscreenVideo` (±3633) bernilai true kalau `IsForegroundFullscreen` (±1984: client rect jendela foreground menutupi monitornya) **dan** jendela itu milik salah satu sumber tersebut. Hasilnya sticky per HWND, jadi video yang di-pause tetap dianggap video sampai keluar fullscreen atau jendela foreground berganti.
+  - `WindowBelongsToMediaSource` (±3582) mencocokkan jendela dengan AUMID lewat tiga cara:
     - (a) `GetApplicationUserModelId` (`PackagedAppIdForPid`) untuk aplikasi UWP. Frame `ApplicationFrameHost.exe` diganti dengan proses child-nya.
     - (b) Nama exe tanpa `.exe` yang muncul di AUMID, plus alias chrome, edge, dan vlc.
     - (c) Firefox: `firefox.exe` dengan AUMID berupa hash hex (`LooksLikeFirefoxAumid`).
@@ -400,7 +400,7 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
     - `isTransientAlert` hanya untuk Volume.
     - `inlineAlert` hanya Volume.
     - Supresi tidak bisa dilewati oleh pin, hover, atau mode minimize.
-    - `LowLevelMouseProc` (±13047) tidak membangunkan island yang di-park.
+    - `LowLevelMouseProc` (±13055) tidak membangunkan island yang di-park.
   - Yang masih boleh muncul hanya **volume** (OSD Windows disembunyikan, jadi ini satu-satunya umpan balik) dan **titik privasi**.
   - Hotkey hide/show memaksa island tampil (`g_fullscreenOverrideVisible`). Status ini direset saat keluar dari fullscreen.
   - `g_isFullscreen` / `isFullscreen` sekarang berarti "fullscreen video". Gate lain yang memakainya (game overlay, HW monitor, `EnsureTopmost`) otomatis tidak aktif di game fullscreen.

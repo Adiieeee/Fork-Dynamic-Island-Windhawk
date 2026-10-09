@@ -3556,6 +3556,26 @@ bool LooksLikeFirefoxAumid(const std::wstring& aumid) {
     return true;
 }
 
+// EnumChildWindows callback for WindowBelongsToMediaSource: finds the first
+// child window owned by a process other than the ApplicationFrameHost frame.
+// A named CALLBACK function, not a lambda: a captureless lambda only converts
+// to the default calling convention, which is not stdcall on 32-bit builds.
+struct FrameContentSearch {
+    DWORD framePid;
+    DWORD contentPid;
+};
+
+BOOL CALLBACK FindFrameContentProc(HWND child, LPARAM param) {
+    auto* search = reinterpret_cast<FrameContentSearch*>(param);
+    DWORD childPid = 0;
+    GetWindowThreadProcessId(child, &childPid);
+    if (childPid && childPid != search->framePid) {
+        search->contentPid = childPid;
+        return FALSE;
+    }
+    return TRUE;
+}
+
 // Whether `hwnd` is a window of the app that owns the SMTC session `aumid`.
 // UWP apps draw inside an ApplicationFrameHost frame, so their content process
 // is found through the frame's child windows.
@@ -3573,20 +3593,8 @@ bool WindowBelongsToMediaSource(HWND hwnd, const std::wstring& aumid) {
     std::wstring base = ToLowerCopy(BaseNameFromPath(image));
 
     if (base == L"applicationframehost.exe") {
-        struct FindContent {
-            DWORD framePid;
-            DWORD contentPid;
-        } find = {pid, 0};
-        EnumChildWindows(hwnd, [](HWND child, LPARAM param) -> BOOL {
-            auto* f = reinterpret_cast<FindContent*>(param);
-            DWORD childPid = 0;
-            GetWindowThreadProcessId(child, &childPid);
-            if (childPid && childPid != f->framePid) {
-                f->contentPid = childPid;
-                return FALSE;
-            }
-            return TRUE;
-        }, reinterpret_cast<LPARAM>(&find));
+        FrameContentSearch find = {pid, 0};
+        EnumChildWindows(hwnd, FindFrameContentProc, reinterpret_cast<LPARAM>(&find));
         if (!find.contentPid) {
             return false;
         }
