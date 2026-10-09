@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.4.0
+// @version         1.5.0
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -58,6 +58,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 
 - **Hover & Scroll:** Hover over the island to seamlessly expand it. Use your mouse scroll wheel to swipe between the Media, Calendar, Weather, Hardware Monitor, and File Tray tabs.
 - **File Tray:** Enable the File Tray module, then drag files onto the island. It jumps to the shelf to confirm the drop. Click a row to open that file; right-click the island to clear the shelf.
+- **Minimize:** The button left of "previous" on the media card tucks the island away into a thin glass line with a faint live waveform. Hover the line to open the full island; click the button again to bring the normal pill back. Alerts such as volume or notifications still pop out while minimized.
 - **Right-Click Menu:** Right-click the island to access Theme presets, Transparency settings, and to pin the island open.
 - **⚠️ Right-click choices are per-session:** The right-click menu is a quick way to try things out, not a place to configure the mod. **Theme**, **shape style** (Pill / Notch / Windows 11) and **pin open** are all re-applied from your Windhawk settings whenever the mod restarts — so a reboot, a mod update, or toggling the mod off and on will discard them. Anything you want to keep, set in the **Mod Settings** tab instead. (Transparency and Expand-on-hover do persist, but the settings tab is still the reliable place for them.)
 - **Windhawk Settings:** Visit the Mod Settings tab to change the island's Position, Size Scale, Refresh Rate (Target FPS), Animation Style (Smooth/Default/Bouncy/Snappy), Animation Speed, and toggle specific modules. You can also perfectly align the island using the `Offset X` and `Offset Y` settings, and select exactly which monitor the island should appear on (including a "Follow Mouse" mode!).
@@ -589,6 +590,19 @@ namespace MediaLayout {
     // the 380px card, left of the pagination dots.
     constexpr float kLyricsButtonOffsetX = 118.0f;
     constexpr float kLyricsButtonRadius = 13.0f;
+
+    // Minimize toggle, the mirror image of the lyrics button on the left of
+    // "previous": its hit box (-137..-99) clears prev's (-86..-42).
+    constexpr float kMinimizeButtonOffsetX = -118.0f;
+    constexpr float kMinimizeButtonRadius = 13.0f;
+
+    // The minimized island: a thin glass line. Too thin to hover precisely,
+    // so the hover target is padded out sideways and below it (and runs up to
+    // the window top).
+    constexpr float kMinimizedLineWidth = 160.0f;
+    constexpr float kMinimizedLineHeight = 8.0f;
+    constexpr float kMinimizedHoverPadX = 40.0f;
+    constexpr float kMinimizedHoverPadBelow = 16.0f;
 
     // Collapsed pill width, without and with a lyric line between the art and
     // the waveform. ActivityForKind picks one; the width spring animates it.
@@ -1294,6 +1308,9 @@ std::atomic<bool> g_lyricsEnabled = true;
 // "Lyrics delay (ms)" setting; positive shows each line later. Kept as an
 // atomic outside Settings so the render-side lyric helpers can read it lock-free.
 std::atomic<int> g_lyricsDelayMs = 0;
+// Minimize toggle (button left of "previous"): the island rests as a thin line
+// and opens on hover. Persisted with Wh_SetIntValue(L"IslandMinimized").
+std::atomic<bool> g_islandMinimized = false;
 std::atomic<bool> g_running = false;
 std::atomic<int> g_idleTab = 0;
 std::atomic<bool> g_layoutDirty = true;
@@ -1615,8 +1632,8 @@ MediaContentPoint MediaContentFromClient(int clientX, int clientY) {
     return out;
 }
 
-// Returns 0 = previous, 1 = play/pause, 2 = next, 3 = lyrics toggle, or -1 for
-// no button.
+// Returns 0 = previous, 1 = play/pause, 2 = next, 3 = lyrics toggle,
+// 4 = minimize toggle, or -1 for no button.
 int MediaTransportHitTest(const MediaContentPoint& pt) {
     if (!pt.valid || pt.height <= MediaLayout::kExpandedMinHeight) {
         return -1;
@@ -1635,6 +1652,7 @@ int MediaTransportHitTest(const MediaContentPoint& pt) {
         {0.0f, MediaLayout::kPlayButtonRadius, 1},
         {MediaLayout::kControlSpacing, MediaLayout::kNavButtonRadius, 2},
         {MediaLayout::kLyricsButtonOffsetX, MediaLayout::kLyricsButtonRadius, 3},
+        {MediaLayout::kMinimizeButtonOffsetX, MediaLayout::kMinimizeButtonRadius, 4},
     };
 
     for (const Target& t : targets) {
@@ -7417,7 +7435,17 @@ class Renderer {
         const float top = (settings.notchStyle || settings.borderMergedMode) ? std::max(0.0f, nudge) : (kRenderPadY + nudge);
         const float left = kRenderPadX;
 
-        if (width >= 2.0f && height >= 2.0f) {
+        // The minimized line replaces the pill entirely. It is also used for the
+        // first and last few pixels of the spring between the line and a full
+        // card, where DrawPill would be laying out art and text in a shape only
+        // a few pixels tall.
+        const bool drawMinimizedLine =
+            minimizedLine_ ||
+            (g_islandMinimized.load(std::memory_order_relaxed) && height < 24.0f * settings.sizeScale);
+
+        if (width >= 2.0f && height >= 2.0f && drawMinimizedLine) {
+            DrawMinimizedLine(state, settings, D2D1::RectF(left, top, left + width, top + height));
+        } else if (width >= 2.0f && height >= 2.0f) {
             if (secondary) {
                 const float gap = 12.0f * settings.sizeScale;
                 const float maxH = std::max(primary.height, secondary->height);
@@ -7458,6 +7486,11 @@ class Renderer {
 
         return UpdateLayeredWindow(hwnd_, nullptr, &dst, &size, memDc_, &src, 0, &blend,
                                    ULW_ALPHA) != FALSE;
+    }
+
+    // Set by the render loop each frame, before Render().
+    void SetMinimizedLine(bool minimizedLine) {
+        minimizedLine_ = minimizedLine;
     }
 
     void Shutdown() {
@@ -10396,7 +10429,7 @@ class Renderer {
         const int pressedCmd = g_pressedMediaButton.load();
         bool isStillAnimating = false;
 
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 5; ++i) {
             const float target = (pressedCmd == i) ? 1.0f : 0.0f;
             const float tau = (target > mediaBtnPress_[i]) ? 0.025f : 0.075f;
             const float k = 1.0f - std::exp(-dt / tau);
@@ -10421,6 +10454,51 @@ class Renderer {
         DrawMediaButton(next, MediaLayout::kNavButtonRadius, 3, false);
         DrawLyricsToggleButton(D2D1::Point2F(play.x + MediaLayout::kLyricsButtonOffsetX, play.y),
                                MediaLayout::kLyricsButtonRadius);
+        DrawMinimizeToggleButton(D2D1::Point2F(play.x + MediaLayout::kMinimizeButtonOffsetX, play.y),
+                                 MediaLayout::kMinimizeButtonRadius);
+    }
+
+    // Minimize on/off (command 4): a bar along the top with a chevron pointing
+    // up to it ("tuck away"). While minimized it is accent-tinted and the
+    // chevron points down ("bring back").
+    void DrawMinimizeToggleButton(D2D1_POINT_2F center, float radius) {
+        const bool minimized = g_islandMinimized.load(std::memory_order_relaxed);
+        const bool isHovered = (g_hoveredMediaButton.load() == 4);
+        const float press = mediaBtnPress_[4];
+        const float r = radius * (1.0f - 0.13f * press);
+
+        const D2D1_COLOR_F bgColor = minimized
+            ? WithAlpha(currentAccent_, (isHovered ? 0.30f : 0.20f) + 0.08f * press)
+            : D2D1::ColorF(1.0f, 1.0f, 1.0f, (isHovered ? 0.09f : 0.040f) + 0.08f * press);
+        const D2D1_COLOR_F iconColor = minimized
+            ? WithAlpha(currentAccent_, 1.0f)
+            : WithAlpha(material_.textPrimary, isHovered ? 0.92f : 0.62f);
+
+        ComPtr<ID2D1SolidColorBrush> bg;
+        ComPtr<ID2D1SolidColorBrush> icon;
+        target_->CreateSolidColorBrush(bgColor, &bg);
+        target_->CreateSolidColorBrush(iconColor, &icon);
+        if (!bg || !icon) {
+            return;
+        }
+        target_->FillEllipse(D2D1::Ellipse(center, r, r), bg.Get());
+
+        const float s = r / MediaLayout::kMinimizeButtonRadius;
+        const float stroke = 1.7f * s;
+        const float barY = center.y - 4.5f * s;
+        target_->FillRoundedRectangle(
+            D2D1::RoundedRect(D2D1::RectF(center.x - 5.5f * s, barY - stroke * 0.5f,
+                                          center.x + 5.5f * s, barY + stroke * 0.5f),
+                              stroke * 0.5f, stroke * 0.5f),
+            icon.Get());
+
+        // Chevron below the bar: apex up when minimizing, apex down when restoring.
+        const float tipY = minimized ? center.y + 4.5f * s : center.y - 0.5f * s;
+        const float baseY = minimized ? center.y + 0.5f * s : center.y + 4.0f * s;
+        target_->DrawLine(D2D1::Point2F(center.x - 4.0f * s, baseY), D2D1::Point2F(center.x, tipY),
+                          icon.Get(), stroke);
+        target_->DrawLine(D2D1::Point2F(center.x + 4.0f * s, baseY), D2D1::Point2F(center.x, tipY),
+                          icon.Get(), stroke);
     }
 
     // Lyrics on/off (command 3). Drawn as three text lines rather than a font
@@ -10822,6 +10900,105 @@ class Renderer {
                                          accentBrush_.Get());
         }
         accentBrush_->SetOpacity(1.0f);
+    }
+
+    // The minimized island: a faint glass line with a thin waveform running
+    // through it. The newest audio sample sits in the middle and older ones
+    // spread toward both ends, which fade out, so the motion reads as a soft
+    // pulse from the centre. Paused or idle, it shows a row of still dots.
+    void DrawMinimizedLine(const SharedState& state, const Settings& settings, D2D1_RECT_F rect) {
+        const float height = rect.bottom - rect.top;
+        const float radius = height * 0.5f;
+        const float s = settings.sizeScale;
+
+        ComPtr<ID2D1SolidColorBrush> brush;
+        target_->CreateSolidColorBrush(WithAlpha(pillBgColor_, 0.50f), &brush);
+        if (!brush) {
+            return;
+        }
+        const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(rect, radius, radius);
+        target_->FillRoundedRectangle(shape, brush.Get());
+
+        // Glass sheen: a faint white wash fading out by the middle of the line.
+        D2D1_GRADIENT_STOP stops[] = {
+            {0.0f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.16f)},
+            {0.55f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.0f)},
+        };
+        ComPtr<ID2D1GradientStopCollection> stopCollection;
+        ComPtr<ID2D1LinearGradientBrush> sheen;
+        if (SUCCEEDED(target_->CreateGradientStopCollection(stops, 2, &stopCollection)) &&
+            SUCCEEDED(target_->CreateLinearGradientBrush(
+                D2D1::LinearGradientBrushProperties(D2D1::Point2F(rect.left, rect.top),
+                                                    D2D1::Point2F(rect.left, rect.bottom)),
+                stopCollection.Get(), &sheen))) {
+            target_->FillRoundedRectangle(shape, sheen.Get());
+        }
+
+        const D2D1_COLOR_F accent = (currentAccent_.a > 0.0f) ? currentAccent_ : D2D1::ColorF(0x4cc9f0);
+        const float centerY = (rect.top + rect.bottom) * 0.5f;
+        const float innerLeft = rect.left + radius;
+        const float innerRight = rect.right - radius;
+        const float innerW = innerRight - innerLeft;
+        if (innerW <= 4.0f) {
+            return;
+        }
+
+        // 0 at both ends of the line, 1 in the middle.
+        auto edgeFade = [&](float x) {
+            const float t = Clamp((x - innerLeft) / innerW, 0.0f, 1.0f);
+            return std::pow(std::sin(t * 3.14159265f), 0.8f);
+        };
+
+        const bool playing = settings.media && state.media.available && state.media.playing;
+        if (playing) {
+            const float barW = 1.6f * s;
+            const float gap = 1.6f * s;
+            const int count = std::max(3, static_cast<int>((innerW + gap) / (barW + gap)));
+            const float used = count * barW + (count - 1) * gap;
+            const float startX = innerLeft + (innerW - used) * 0.5f;
+            const float maxH = height * 0.78f;
+            const int size = static_cast<int>(state.waveform.size());
+            const float half = (count - 1) * 0.5f;
+
+            for (int i = 0; i < count; ++i) {
+                const float fromCenter = (half > 0.0f) ? std::fabs(i - half) / half : 0.0f;
+                const int age = static_cast<int>(fromCenter * (size - 1));
+                const int source = ((static_cast<int>(state.waveformWrite) - 1 - age) % size + size) % size;
+                const float amp = Clamp(state.waveform[source], 0.04f, 1.0f);
+                const float h = std::max(1.2f * s, amp * maxH);
+                const float x = startX + i * (barW + gap);
+                brush->SetColor(WithAlpha(accent, (0.30f + 0.45f * amp) * edgeFade(x + barW * 0.5f)));
+                target_->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(x, centerY - h * 0.5f, x + barW, centerY + h * 0.5f),
+                                      barW * 0.5f, barW * 0.5f),
+                    brush.Get());
+            }
+        } else {
+            const float step = 6.0f * s;
+            const int count = std::max(1, static_cast<int>(innerW / step));
+            const float startX = innerLeft + (innerW - (count - 1) * step) * 0.5f;
+            for (int i = 0; i < count; ++i) {
+                const float x = startX + i * step;
+                brush->SetColor(WithAlpha(material_.textPrimary, 0.35f * edgeFade(x)));
+                target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, centerY), 0.9f * s, 0.9f * s), brush.Get());
+            }
+        }
+
+        // Privacy indicators stay visible while minimized, as small dots just
+        // past the right end of the line.
+        const bool micOn = state.system.micActive && settings.privacyDots && settings.privacyDotsMic;
+        const bool camOn = state.system.cameraActive && settings.privacyDots && settings.privacyDotsCam;
+        float dotX = rect.right + 6.0f * s;
+        const float dotR = std::max(2.0f, radius * 0.55f);
+        if (camOn) {
+            brush->SetColor(D2D1::ColorF(0x30D158));
+            target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(dotX + dotR, centerY), dotR, dotR), brush.Get());
+            dotX += dotR * 2.0f + 4.0f * s;
+        }
+        if (micOn) {
+            brush->SetColor(D2D1::ColorF(0xFF9F0A));
+            target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(dotX + dotR, centerY), dotR, dotR), brush.Get());
+        }
     }
 
     void DrawCountdownProgress(float left, float right, float bottom, float progress) {
@@ -11655,7 +11832,8 @@ class Renderer {
     // so track changes don't produce a jarring instant color pop.
     D2D1_COLOR_F currentAccent_ = D2D1::ColorF(0x4cc9f0);
     double       lastAccentTime_ = -1.0;  // -1 = not yet set (will snap on first frame)
-    float        mediaBtnPress_[4] = {0.0f, 0.0f, 0.0f, 0.0f};  // prev, play, next, lyrics
+    float        mediaBtnPress_[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};  // prev, play, next, lyrics, minimize
+    bool         minimizedLine_ = false;  // set per frame by the render loop
     double       lastMediaBtnTime_ = -1.0;
 };
 
@@ -12412,7 +12590,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     !kinds.empty() && kinds[0] == IslandKind::Idle &&
                     (g_settings.gameOverlay || Wh_GetIntValue(L"GameOverlayPinned", 0) != 0);
 
-                bool expanded = Wh_GetIntValue(L"PinnedExpanded", 0) != 0 || g_clickExpanded.load();
+                // A minimized island is already open whenever it can be clicked
+                // (hovering opens it), so the first click must not be eaten as
+                // "click to expand".
+                bool expanded = Wh_GetIntValue(L"PinnedExpanded", 0) != 0 || g_clickExpanded.load() ||
+                                g_islandMinimized.load();
                 if (!gameMetricsPresent && !g_settings.expandOnHover && !expanded) {
                     g_clickExpanded = true;
                     g_layoutDirty = true;
@@ -12460,6 +12642,16 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         const bool enable = !g_lyricsEnabled.load();
                         g_lyricsEnabled = enable;
                         Wh_SetIntValue(L"LyricsEnabled", enable ? 1 : 0);
+                        g_layoutDirty = true;
+                        return 0;
+                    }
+                    if (cmd == 4) {
+                        // Minimize toggle, also local to the island. The cursor
+                        // is still over the card, so it stays open until the
+                        // mouse leaves and then settles into the line.
+                        const bool minimize = !g_islandMinimized.load();
+                        g_islandMinimized = minimize;
+                        Wh_SetIntValue(L"IslandMinimized", minimize ? 1 : 0);
                         g_layoutDirty = true;
                         return 0;
                     }
@@ -12926,6 +13118,18 @@ DWORD WINAPI RenderThreadProc(void*) {
                 windowRect.left + static_cast<int>(std::round(kRenderPadX + widthSpring.value)),
                 windowRect.top + static_cast<int>(std::round(topPad + nudgeSpring.value + heightSpring.value))
             };
+            // The minimized line is only a few pixels tall, so while it is
+            // (still) that small the hover target is padded out around it and
+            // runs up to the window top. Once it has opened, the card itself is
+            // the target again, so leaving the card closes it back down.
+            if (g_islandMinimized.load(std::memory_order_relaxed) && heightSpring.value < 30.0f) {
+                const int padX = static_cast<int>(std::round(MediaLayout::kMinimizedHoverPadX * g_settings.sizeScale));
+                const int padBelow = static_cast<int>(std::round(MediaLayout::kMinimizedHoverPadBelow * g_settings.sizeScale));
+                pillRect.left -= padX;
+                pillRect.right += padX;
+                pillRect.top = windowRect.top;
+                pillRect.bottom += padBelow;
+            }
             hover = PtInRect(&pillRect, cursor) != FALSE;
         } else if (g_settings.unhideOnHover) {
             RECT dockRect = GetIslandDockRect();
@@ -12984,7 +13188,15 @@ DWORD WINAPI RenderThreadProc(void*) {
             isHoverExpanded = false;
         }
 
-        if (currentlyHidden && !g_settings.unhideOnHover) {
+        // Minimized: the island rests as a thin line and hovering it always
+        // opens the full card, whatever Expand-on-hover is set to. The in-game
+        // metrics strip keeps its own behaviour.
+        const bool minimizedMode = g_islandMinimized.load(std::memory_order_relaxed) && !gameMetricsPresent;
+        if (minimizedMode) {
+            isHoverExpanded = hover;
+        }
+
+        if (currentlyHidden && !g_settings.unhideOnHover && !minimizedMode) {
             isHoverExpanded = false;
         } else if (isHoverExpanded || hoverUnhides || pinned || isTransientAlert || unhideGraceActive) {
             lastInteractionTime = now;
@@ -13001,6 +13213,11 @@ DWORD WINAPI RenderThreadProc(void*) {
                     isHidden = (now - lastInteractionTime > g_settings.autoHideIdleSeconds);
                 }
             }
+        }
+        // The line is the minimized island's resting state, so idle auto-hide
+        // never takes it away (fullscreen suppression still does, below).
+        if (minimizedMode) {
+            isHidden = false;
         }
 
         static bool isFullscreen = false;
@@ -13093,6 +13310,17 @@ DWORD WINAPI RenderThreadProc(void*) {
                 primary.height = MediaLayout::kExpandedHeight * g_settings.sizeScale;
             }
         }
+
+        // Minimized and nothing asking for attention: rest as the thin line.
+        // Transient alerts still surface at their normal size, then the island
+        // springs back down to the line once they expire.
+        const bool minimizedLine = minimizedMode && !isHoverExpanded && !pinned && !isTransientAlert;
+        if (minimizedLine) {
+            primary.width = MediaLayout::kMinimizedLineWidth * g_settings.sizeScale;
+            primary.height = MediaLayout::kMinimizedLineHeight * g_settings.sizeScale;
+            secondary.reset();
+        }
+        renderer.SetMinimizedLine(minimizedLine);
 
         const bool fullscreenSuppressed =
             isFullscreen && !g_fullscreenOverrideVisible.load(std::memory_order_relaxed);
@@ -13609,6 +13837,7 @@ void StopThreads() {
 BOOL WhTool_ModInit() {
     LoadSettings();
     g_lyricsEnabled = Wh_GetIntValue(L"LyricsEnabled", 1) != 0;
+    g_islandMinimized = Wh_GetIntValue(L"IslandMinimized", 0) != 0;
 
     if (!StartThreads()) {
         StopThreads();
