@@ -317,6 +317,9 @@ We love community contributions! To ensure high-quality updates, please follow t
   - MediaAutoExpand: false
     $name: Auto-expand on track change
     $description: Automatically expand the island when a new song or video starts playing. If disabled, album art updates smoothly in the collapsed pill without unprompted expansion.
+  - LyricsDelayMs: 0
+    $name: Lyrics delay (ms)
+    $description: Shifts the synced lyrics in the collapsed pill. Positive values show each line later, negative values earlier. Use it if lyrics appear ahead of or behind the song (e.g. 500 = half a second later). Lyrics are turned on or off with the button next to the playback controls.
   - Volume: true
     $name: Volume slider flyout
     $description: Shows a volume slider banner on the island when adjusting system volume. Disable if you prefer the default Windows volume flyout.
@@ -491,6 +494,7 @@ We love community contributions! To ensure high-quality updates, please follow t
 #include <cstdint>
 #include <cwchar>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -1282,10 +1286,14 @@ HANDLE g_weatherThread = nullptr;
 HANDLE g_notificationThread = nullptr;
 HANDLE g_bluetoothThread = nullptr;
 HANDLE g_lyricsThread = nullptr;
+HANDLE g_artworkThread = nullptr;
 // Lyrics on/off, toggled from the button next to "next" on the media card.
 // Persisted with Wh_SetIntValue(L"LyricsEnabled") and loaded in WhTool_ModInit,
 // so unlike the right-click choices it survives a restart.
 std::atomic<bool> g_lyricsEnabled = true;
+// "Lyrics delay (ms)" setting; positive shows each line later. Kept as an
+// atomic outside Settings so the render-side lyric helpers can read it lock-free.
+std::atomic<int> g_lyricsDelayMs = 0;
 std::atomic<bool> g_running = false;
 std::atomic<int> g_idleTab = 0;
 std::atomic<bool> g_layoutDirty = true;
@@ -2107,6 +2115,7 @@ void LoadSettings() {
 
     next.media = Wh_GetIntSetting(L"Modules.Media") != 0;
     next.mediaAutoExpand = Wh_GetIntSetting(L"Modules.MediaAutoExpand") != 0;
+    g_lyricsDelayMs = std::clamp(Wh_GetIntSetting(L"Modules.LyricsDelayMs"), -10000, 10000);
     next.volume = Wh_GetIntSetting(L"Modules.Volume") != 0;
     if (!next.volume) {
         std::lock_guard lock(g_stateMutex);
@@ -3694,21 +3703,44 @@ std::vector<uint8_t> ReadWinRtStreamBytes(
         return bytes;
     }
 
-    auto stream = reference.OpenReadAsync().get();
-    if (!stream) {
-        return bytes;
-    }
+    // Read in chunks until the stream runs dry. A single LoadAsync(size) is not
+    // guaranteed to deliver everything: Spotify's thumbnail stream sometimes
+    // hands over only part of the image per call, or reports Size() == 0 while
+    // the bytes are still arriving. The old one-shot read then either threw from
+    // ReadBytes (aborting the whole media poll) or bailed out early, and the
+    // cover fell back to the source badge.
+    constexpr uint64_t kMaxBytes = 8 * 1024 * 1024;
+    constexpr uint32_t kChunk = 64 * 1024;
+    try {
+        auto stream = reference.OpenReadAsync().get();
+        if (!stream) {
+            return bytes;
+        }
 
-    const uint64_t size64 = stream.Size();
-    if (size64 == 0 || size64 > 8 * 1024 * 1024) {
-        return bytes;
-    }
+        const uint64_t size64 = stream.Size();
+        if (size64 > kMaxBytes) {
+            return bytes;
+        }
 
-    const uint32_t size = static_cast<uint32_t>(size64);
-    winrt::Windows::Storage::Streams::DataReader reader(stream.GetInputStreamAt(0));
-    reader.LoadAsync(size).get();
-    bytes.resize(size);
-    reader.ReadBytes(winrt::array_view<uint8_t>(bytes.data(), bytes.data() + bytes.size()));
+        winrt::Windows::Storage::Streams::DataReader reader(stream.GetInputStreamAt(0));
+        reader.InputStreamOptions(winrt::Windows::Storage::Streams::InputStreamOptions::Partial);
+        while (bytes.size() < kMaxBytes) {
+            uint32_t want = kChunk;
+            if (size64 > 0) {
+                if (bytes.size() >= size64) break;
+                want = static_cast<uint32_t>(std::min<uint64_t>(kChunk, size64 - bytes.size()));
+            }
+            const uint32_t got = reader.LoadAsync(want).get();
+            if (got == 0) {
+                break;
+            }
+            const size_t offset = bytes.size();
+            bytes.resize(offset + got);
+            reader.ReadBytes(winrt::array_view<uint8_t>(bytes.data() + offset, bytes.data() + bytes.size()));
+        }
+    } catch (...) {
+        bytes.clear();
+    }
     return bytes;
 }
 
@@ -4864,6 +4896,10 @@ std::string HttpGet(const wchar_t* host, const wchar_t* path, bool https = true)
         return response;
     }
 
+    // Without explicit timeouts WinHTTP waits up to 30s for a response, which
+    // can outlast the 3s StopThreads allows a worker to finish.
+    WinHttpSetTimeouts(hSession, 5000, 5000, 8000, 8000);
+
     HINTERNET hConnect = WinHttpConnect(hSession, host, https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT, 0);
     if (hConnect) {
         HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", path, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, https ? WINHTTP_FLAG_SECURE : 0);
@@ -4876,8 +4912,9 @@ std::string HttpGet(const wchar_t* host, const wchar_t* path, bool https = true)
                     if (WinHttpQueryDataAvailable(hRequest, &size) && size > 0) {
                         std::vector<char> buffer(size + 1);
                         if (WinHttpReadData(hRequest, buffer.data(), size, &downloaded)) {
-                            buffer[downloaded] = '\0';
-                            response.append(buffer.data());
+                            // Length-based so binary bodies (album art) survive
+                            // embedded NUL bytes.
+                            response.append(buffer.data(), downloaded);
                         } else {
                             Wh_Log(L"Weather HttpGet: WinHttpReadData failed with error %lu", GetLastError());
                         }
@@ -5170,6 +5207,75 @@ int LyricLineIndexAt(const std::vector<LyricLine>& lines, double positionSec) {
     auto it = std::upper_bound(lines.begin(), lines.end(), positionSec,
                                [](double t, const LyricLine& line) { return t < line.timeSec; });
     return static_cast<int>(it - lines.begin()) - 1;
+}
+
+// Estimated playhead in seconds, the same way the expanded scrubber computes it.
+double MediaPlayheadSeconds(const MediaSnapshot& media) {
+    double position = media.positionTicks / 10000000.0;
+    if (media.playing && media.lastUpdatedTicks > 0) {
+        position += (GetTickCount64() - media.lastUpdatedTicks) / 1000.0;
+    }
+    return position;
+}
+
+// The playhead as the lyrics see it, with the user's "Lyrics delay" applied.
+double LyricsPlayheadSeconds(const MediaSnapshot& media) {
+    return MediaPlayheadSeconds(media) - g_lyricsDelayMs.load(std::memory_order_relaxed) / 1000.0;
+}
+
+// Empty lines, and lines that only hold a music note, mark an instrumental gap.
+bool IsLyricGap(const std::vector<LyricLine>& lines, int index) {
+    if (index < 0 || index >= static_cast<int>(lines.size())) {
+        return true;
+    }
+    for (wchar_t c : lines[index].text) {
+        if (!iswspace(c) && c != L'♪' && c != L'♫') {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Whether the collapsed pill should be widened for a lyric line right now.
+// It looks slightly ahead so the width spring has finished growing by the time
+// a line comes in, and short gaps between lines keep it wide instead of
+// shrinking and regrowing within a couple of seconds. Before the first line
+// and during long instrumental breaks it stays at its normal width.
+bool LyricsWantWidePill(const SharedState& state) {
+    if (!LyricsShowable(state)) {
+        return false;
+    }
+    // Just enough for the width spring to open up as the line lands; more
+    // than this made the pill visibly widen ahead of the singing.
+    constexpr double kGrowLeadSeconds = 0.35;
+    constexpr double kShortGapSeconds = 4.0;
+
+    const std::vector<LyricLine>& lines = state.lyrics.lines;
+    const double position = LyricsPlayheadSeconds(state.media);
+
+    if (!IsLyricGap(lines, LyricLineIndexAt(lines, position + kGrowLeadSeconds))) {
+        return true;
+    }
+
+    // A line still being sung keeps the pill wide even when the lookahead
+    // already reaches the break after it.
+    const int gapIndex = LyricLineIndexAt(lines, position);
+    if (!IsLyricGap(lines, gapIndex)) {
+        return true;
+    }
+
+    // In a gap. Stay wide if it is short and sits between two sung lines.
+    if (gapIndex < 1 || IsLyricGap(lines, gapIndex - 1)) {
+        return false;  // before the first line, or a break that already began
+    }
+    int nextSung = gapIndex + 1;
+    while (nextSung < static_cast<int>(lines.size()) && IsLyricGap(lines, nextSung)) {
+        ++nextSung;
+    }
+    if (nextSung >= static_cast<int>(lines.size())) {
+        return false;  // outro
+    }
+    return lines[nextSung].timeSec - lines[gapIndex].timeSec < kShortGapSeconds;
 }
 
 std::wstring Utf8ToWide(const std::string& utf8) {
@@ -5485,6 +5591,183 @@ DWORD WINAPI LyricsThreadProc(void*) {
             }
         }
         g_layoutDirty = true;
+    }
+    return 0;
+}
+
+// ── Album art fallback (iTunes Search) ───────────────────────────────────────
+//
+// Some tracks never get a usable SMTC thumbnail from Spotify (or other players),
+// which leaves the source badge where the cover should be. When a track has had
+// no art for a few seconds, ArtworkThreadProc looks the cover up on the iTunes
+// Search API (free, no key) and fills it in. SMTC art always wins: the fallback
+// only writes into a track whose art is still empty.
+
+// Loose artist match, so "Artist" still matches "Artist, Guest" and "Artist &
+// Guest" in either direction.
+bool ArtistNamesMatch(const std::wstring& a, const std::wstring& b) {
+    std::wstring x = ToLowerCopy(a);
+    std::wstring y = ToLowerCopy(b);
+    if (x.empty() || y.empty()) {
+        return false;
+    }
+    if (x.find(y) != std::wstring::npos || y.find(x) != std::wstring::npos) {
+        return true;
+    }
+    const std::wstring firstX = x.substr(0, x.find_first_of(L",&"));
+    const std::wstring firstY = y.substr(0, y.find_first_of(L",&"));
+    return !firstX.empty() && !firstY.empty() &&
+           (x.find(firstY) != std::wstring::npos || y.find(firstX) != std::wstring::npos);
+}
+
+// Looks the track up on iTunes and decodes a 600px cover into *out.
+// networkFailed is set when no answer came back at all, so the caller can retry.
+bool FetchArtworkFromItunes(const std::wstring& title, const std::wstring& artist,
+                            BitmapPixels* out, bool* networkFailed) {
+    *networkFailed = false;
+    const std::wstring term = artist + L" " + SimplifyTrackTitle(title);
+    const std::wstring path = L"/search?media=music&entity=song&limit=10&term=" + PercentEncodeUtf8(term);
+    const std::string body = HttpGet(L"itunes.apple.com", path.c_str());
+    if (body.empty()) {
+        *networkFailed = true;
+        return false;
+    }
+
+    // Each result lists artistName before its artworkUrl100.
+    std::string artworkUrl;
+    size_t from = 0;
+    std::string resultArtist;
+    while (NextJsonStringField(body, "artistName", &from, &resultArtist)) {
+        size_t urlFrom = from;
+        std::string url;
+        if (!NextJsonStringField(body, "artworkUrl100", &urlFrom, &url)) {
+            break;
+        }
+        from = urlFrom;
+        if (ArtistNamesMatch(Utf8ToWide(resultArtist), artist)) {
+            artworkUrl = std::move(url);
+            break;
+        }
+    }
+    if (artworkUrl.empty()) {
+        return false;
+    }
+
+    // Ask for a larger rendition than the 100px thumbnail the URL names.
+    const size_t sizeTag = artworkUrl.find("100x100bb");
+    if (sizeTag != std::string::npos) {
+        artworkUrl.replace(sizeTag, 9, "600x600bb");
+    }
+
+    constexpr std::string_view kScheme = "https://";
+    if (artworkUrl.compare(0, kScheme.size(), kScheme) != 0) {
+        return false;
+    }
+    const size_t slash = artworkUrl.find('/', kScheme.size());
+    if (slash == std::string::npos) {
+        return false;
+    }
+    const std::wstring host = Utf8ToWide(artworkUrl.substr(kScheme.size(), slash - kScheme.size()));
+    const std::wstring imagePath = Utf8ToWide(artworkUrl.substr(slash));
+
+    const std::string image = HttpGet(host.c_str(), imagePath.c_str());
+    if (image.empty()) {
+        *networkFailed = true;
+        return false;
+    }
+    return DecodeImageBytesToPixels(std::vector<uint8_t>(image.begin(), image.end()), out);
+}
+
+DWORD WINAPI ArtworkThreadProc(void*) {
+    // WIC (DecodeImageBytesToPixels) needs COM on this thread.
+    const HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    // Recent lookups; an empty bitmap caches "iTunes has no match".
+    std::unordered_map<std::wstring, BitmapPixels> cache;
+    std::vector<std::wstring> cacheOrder;
+    constexpr size_t kCacheMax = 30;
+    // SMTC gets this long to deliver a cover before the fallback steps in.
+    constexpr double kMissingArtGraceSeconds = 4.0;
+
+    std::wstring missingKey;      // track currently showing no art
+    double missingSince = 0.0;
+    std::wstring attemptedKey;    // track already looked up
+    double retryAt = 0.0;
+
+    while (WaitForSingleObject(g_stopEvent, 1000) == WAIT_TIMEOUT) {
+        std::wstring title, artist, key;
+        bool artMissing = false;
+        {
+            std::lock_guard lock(g_stateMutex);
+            if (g_state.media.available) {
+                key = LyricsTrackKey(g_state.media);
+                artMissing = g_state.media.art.bgra.empty();
+                title = g_state.media.title;
+                artist = g_state.media.artist;
+            }
+        }
+        const double now = NowSeconds();
+        if (key.empty() || !artMissing) {
+            missingKey.clear();
+            continue;
+        }
+        if (key != missingKey) {
+            missingKey = key;
+            missingSince = now;
+            continue;
+        }
+        if (now - missingSince < kMissingArtGraceSeconds ||
+            (key == attemptedKey && now < retryAt)) {
+            continue;
+        }
+        attemptedKey = key;
+        retryAt = std::numeric_limits<double>::infinity();
+
+        BitmapPixels art;
+        auto cached = cache.find(key);
+        if (cached != cache.end()) {
+            art = cached->second;
+        } else {
+            bool networkFailed = false;
+            if (!FetchArtworkFromItunes(title, artist, &art, &networkFailed)) {
+                art = BitmapPixels{};
+            }
+            if (WaitForSingleObject(g_stopEvent, 0) != WAIT_TIMEOUT) {
+                break;
+            }
+            if (networkFailed) {
+                retryAt = now + 30.0;  // try this track again later
+                continue;
+            }
+            if (cache.size() >= kCacheMax && !cacheOrder.empty()) {
+                cache.erase(cacheOrder.front());
+                cacheOrder.erase(cacheOrder.begin());
+            }
+            cache[key] = art;
+            cacheOrder.push_back(key);
+            Wh_Log(L"Album art: SMTC gave no cover, iTunes fallback %s",
+                   art.bgra.empty() ? L"found no match" : L"filled it in");
+        }
+        if (art.bgra.empty()) {
+            continue;
+        }
+
+        // A fresh generation so the renderer rebuilds its bitmap even when a
+        // cached cover is reused.
+        art.generation = ++g_artGenerationCounter;
+        {
+            std::lock_guard lock(g_stateMutex);
+            if (LyricsTrackKey(g_state.media) == key && g_state.media.art.bgra.empty()) {
+                g_state.media.artGeneration = art.generation;
+                g_state.media.artChangedAt = NowSeconds();
+                g_state.media.art = std::move(art);
+            }
+        }
+        g_layoutDirty = true;
+    }
+
+    if (SUCCEEDED(hrCo)) {
+        CoUninitialize();
     }
     return 0;
 }
@@ -10006,29 +10289,22 @@ class Renderer {
             return;
         }
 
-        // Fade in with the width spring instead of overlapping the art and
-        // waveform while the pill is still growing (or shrinking back).
+        // Lyric text fades in with the width spring instead of overlapping the
+        // art and waveform while the pill is still growing (or shrinking back).
+        // The music note shown during gaps is narrow enough for the normal
+        // width, which is what LyricsWantWidePill keeps the pill at then.
         const float available = area.right - area.left;
         const float widthAlpha = std::clamp((available - 60.0f) / 80.0f, 0.0f, 1.0f);
-        if (widthAlpha <= 0.01f) {
-            return;
-        }
+        const float noteAlpha = std::clamp((available - 8.0f) / 12.0f, 0.0f, 1.0f);
+        const std::wstring kNote = L"♪";
+        auto alphaFor = [&](const std::wstring& text) { return text == kNote ? noteAlpha : widthAlpha; };
 
-        // Same playhead estimate as the expanded scrubber, nudged slightly
-        // ahead so a line appears as it is sung rather than just after.
-        double position = state.media.positionTicks / 10000000.0;
-        if (state.media.playing && state.media.lastUpdatedTicks > 0) {
-            position += (GetTickCount64() - state.media.lastUpdatedTicks) / 1000.0;
-        }
-        position += 0.2;
+        const double position = LyricsPlayheadSeconds(state.media);
 
         const std::vector<LyricLine>& lines = state.lyrics.lines;
         const int index = LyricLineIndexAt(lines, position);
         auto lineText = [&](int i) {
-            if (i < 0 || i >= static_cast<int>(lines.size()) || lines[i].text.empty()) {
-                return std::wstring(L"♪");  // instrumental gap
-            }
-            return lines[i].text;
+            return IsLyricGap(lines, i) ? kNote : lines[i].text;
         };
 
         if (state.lyrics.trackKey != lyricShownKey_) {
@@ -10061,9 +10337,11 @@ class Renderer {
         const float eased = 1.0f - (1.0f - t) * (1.0f - t);
 
         if (eased < 1.0f && !lyricPrevText_.empty()) {
-            DrawLyricLine(lyricPrevText_, area, lyricPrevCache_, widthAlpha * (1.0f - eased), -6.0f * eased, 1.0f);
+            DrawLyricLine(lyricPrevText_, area, lyricPrevCache_, alphaFor(lyricPrevText_) * (1.0f - eased),
+                          -6.0f * eased, 1.0f);
         }
-        DrawLyricLine(lineText(index), area, lyricCache_, widthAlpha * eased, 6.0f * (1.0f - eased), scroll);
+        const std::wstring current = lineText(index);
+        DrawLyricLine(current, area, lyricCache_, alphaFor(current) * eased, 6.0f * (1.0f - eased), scroll);
     }
 
     // One lyric line, centered in `area` when it fits and otherwise scrolled
@@ -11387,11 +11665,11 @@ Activity ActivityForKind(IslandKind kind, const Settings& settings, const Shared
 
     switch (kind) {
         case IslandKind::Media:
-            // Widen only when there is a lyric line to show; with lyrics off,
-            // or a track LRCLIB has no synced lyrics for, the pill keeps its
-            // usual size.
-            activity.width = LyricsShowable(state) ? MediaLayout::kCollapsedLyricsWidth
-                                                   : MediaLayout::kCollapsedWidth;
+            // Widen only while a lyric line is (about to be) sung; with lyrics
+            // off, a track LRCLIB has no synced lyrics for, or an instrumental
+            // stretch, the pill keeps its usual size.
+            activity.width = LyricsWantWidePill(state) ? MediaLayout::kCollapsedLyricsWidth
+                                                       : MediaLayout::kCollapsedWidth;
             activity.height = 44.0f;
             break;
         case IslandKind::Progress:
@@ -13267,6 +13545,7 @@ bool StartThreads() {
     g_audioThread = CreateThread(nullptr, 0, AudioThreadProc, nullptr, 0, nullptr);
     g_weatherThread = CreateThread(nullptr, 0, WeatherThreadProc, nullptr, 0, nullptr);
     g_lyricsThread = CreateThread(nullptr, 0, LyricsThreadProc, nullptr, 0, nullptr);
+    g_artworkThread = CreateThread(nullptr, 0, ArtworkThreadProc, nullptr, 0, nullptr);
     g_keyboardThread = CreateThread(nullptr, 0, KeyboardThreadProc, nullptr, 0, &g_keyboardThreadId);
     g_mouseThread = CreateThread(nullptr, 0, MouseThreadProc, nullptr, 0, &g_mouseThreadId);
 #if DYNAMIC_ISLAND_HAS_USER_NOTIFICATION_LISTENER
@@ -13290,7 +13569,7 @@ void StopThreads() {
         SetEvent(g_stopEvent);
     }
 
-    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_lyricsThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread};
+    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_lyricsThread, g_artworkThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread};
     for (HANDLE handle : handles) {
         if (handle) {
             WaitForSingleObject(handle, 3000);
@@ -13303,6 +13582,7 @@ void StopThreads() {
     g_audioThread = nullptr;
     g_weatherThread = nullptr;
     g_lyricsThread = nullptr;
+    g_artworkThread = nullptr;
     g_notificationThread = nullptr;
     g_keyboardThread = nullptr;
     g_keyboardThreadId = 0;
