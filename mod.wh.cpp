@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.7.2
+// @version         1.7.3
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -3477,6 +3477,44 @@ bool ProcessImageNameForWindow(HWND hwnd, std::wstring* imageName) {
     return ProcessImageNameForPid(pid, imageName);
 }
 
+// True while the screen-snip overlay (Win+Shift+S / Print Screen) is up: the
+// foreground window belongs to Snipping Tool and covers its monitor, which the
+// app's own editor window does not. The island hides for that time so it never
+// sits over the frozen screen or the snip toolbar at the top centre (the
+// render loop would otherwise reclaim topmost above the overlay every second).
+bool IsScreenSnipActive(HWND overlay) {
+    HWND fg = GetForegroundWindow();
+    if (!fg || fg == overlay || !IsWindowVisible(fg)) {
+        return false;
+    }
+
+    // The image name only changes with the window, so it is looked up once per
+    // foreground HWND rather than opening the process every poll.
+    static HWND cachedWindow = nullptr;
+    static bool cachedIsSnipProcess = false;
+    static std::wstring cachedExe;
+    if (fg != cachedWindow) {
+        cachedWindow = fg;
+        std::wstring image;
+        ProcessImageNameForWindow(fg, &image);
+        const size_t slash = image.find_last_of(L"\\/");
+        cachedExe = ToLowerCopy(slash == std::wstring::npos ? image : image.substr(slash + 1));
+        cachedIsSnipProcess = cachedExe == L"screenclippinghost.exe" || cachedExe == L"snippingtool.exe";
+    }
+    if (!cachedIsSnipProcess) {
+        return false;
+    }
+
+    RECT rc = {};
+    MONITORINFO mi = {sizeof(MONITORINFO)};
+    if (!GetWindowRect(fg, &rc) ||
+        !GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mi)) {
+        return false;
+    }
+    return rc.left <= mi.rcMonitor.left && rc.top <= mi.rcMonitor.top &&
+           rc.right >= mi.rcMonitor.right && rc.bottom >= mi.rcMonitor.bottom;
+}
+
 std::wstring FriendlyMediaSourceName(std::wstring_view source) {
     const std::wstring lower = ToLowerCopy(std::wstring(source));
     if (lower.find(L"youtube") != std::wstring::npos) return L"YouTube";
@@ -6898,6 +6936,15 @@ void ApplyVolumeKey(UINT vk) {
             }
         }
         if (SUCCEEDED(hr)) {
+            // Raise the pill directly as well: at 100% (or 0%) a step changes
+            // nothing, so OnNotify stays silent and the press would otherwise
+            // give no feedback at all.
+            float level = 0.0f;
+            BOOL muted = FALSE;
+            if (SUCCEEDED(s_endpoint->GetMasterVolumeLevelScalar(&level)) &&
+                SUCCEEDED(s_endpoint->GetMute(&muted))) {
+                ReportVolumeChange(ClampInt(static_cast<int>(level * 100.0f + 0.5f), 0, 100), muted != FALSE);
+            }
             return;
         }
         // The cached endpoint goes stale when the default device changes or is
@@ -8078,6 +8125,7 @@ struct InlineAlertContent {
     float barValue = 0.0f;
     bool barMuted = false;
     D2D1_COLOR_F iconColor = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f);  // Battery fill / Ring stroke
+    IDWriteTextFormat* primaryFormat = nullptr;  // null: the renderer's textFormat_
 };
 
 // Measured geometry of the collapsed idle strip, produced by
@@ -8302,6 +8350,7 @@ class Renderer {
         idleTextFormat_.Reset();
         calDayLargeFormat_.Reset();
         calGridFormat_.Reset();
+        clipboardTextFormat_.Reset();
         dwriteFactory_.Reset();
         d2dFactory_.Reset();
 
@@ -8489,6 +8538,7 @@ class Renderer {
         calGridFormat_ = nullptr;
         timeDashboardFormat_ = nullptr;
         dateDashboardFormat_ = nullptr;
+        clipboardTextFormat_ = nullptr;
 
         const wchar_t* defaultDisplay = L"Segoe UI Variable Display";
         const wchar_t* defaultSmall = L"Segoe UI Variable Small";
@@ -8543,6 +8593,11 @@ class Renderer {
         createFormat(mainFamily, defaultDisplay,
                      DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
                      DWRITE_FONT_STRETCH_NORMAL, 16.0f * ts, dateDashboardFormat_);
+        // Copied text: a step below textFormat_ (13.5), which read as too large
+        // for a passing notice, yet above the 11px small face.
+        createFormat(mainFamily, defaultDisplay,
+                     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
+                     DWRITE_FONT_STRETCH_NORMAL, 12.0f * ts, clipboardTextFormat_);
 
         usingFluentIcons_ = false;
         ComPtr<IDWriteFontCollection> sysFonts;
@@ -8591,6 +8646,9 @@ class Renderer {
 
         if (textFormat_) {
             textFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        }
+        if (clipboardTextFormat_) {
+            clipboardTextFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         }
         if (smallTextFormat_) {
             smallTextFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -9299,13 +9357,13 @@ class Renderer {
     // so both stay pixel-identical. Returns the accent brush it used, which the
     // calendar grid reuses for today's marker.
     ComPtr<ID2D1SolidColorBrush> DrawCalendarHero(D2D1_RECT_F rect, const Settings& settings,
-                                                  float scale, SYSTEMTIME& local) {
+                                                  float scale, SYSTEMTIME& local, float heroWidth = 93.0f) {
         // ── Hero column ──────────────────────────────────────────────────────
         // Today's date as an editorial block: month over a large day figure over
         // the weekday. Uses the shared DrawCard so it matches every other panel
         // instead of being a one-off translucent slab.
         const D2D1_RECT_F hero = D2D1::RectF(rect.left + 22.0f * scale, rect.top + 16.0f * scale,
-                                             rect.left + 115.0f * scale, rect.bottom - 20.0f * scale);
+                                             rect.left + (22.0f + heroWidth) * scale, rect.bottom - 20.0f * scale);
         DrawCard(hero, InsetCardRadius(rect, scale));
 
         // The accent is the album-art / system accent like everywhere else. This
@@ -9777,16 +9835,18 @@ class Renderer {
                                   double now, float scale, SYSTEMTIME& local, bool hasWeather,
                                   const std::wstring& wText) {
         (void)now;
-        DrawCalendarHero(rect, settings, scale, local);
+        // Wider than the calendar tab's 93px hero: there is no month grid to
+        // make room for here.
+        DrawCalendarHero(rect, settings, scale, local, 112.0f);
 
         // Same vertical band as the hero card (top + 16 .. bottom - 20), so the
         // two halves share a top and bottom edge. The right inset leaves room
         // for the pagination dots.
         const float bandTop = rect.top + 16.0f * scale;
         const float bandBottom = rect.bottom - 20.0f * scale;
-        const float dividerX = rect.left + 130.0f * scale;
-        const float colLeft = rect.left + 146.0f * scale;
-        const float colRight = rect.right - 26.0f * scale;
+        const float dividerX = rect.left + 146.0f * scale;
+        const float colLeft = rect.left + 160.0f * scale;
+        const float colRight = rect.right - 24.0f * scale;
 
         ComPtr<ID2D1SolidColorBrush> divider;
         target_->CreateSolidColorBrush(WithAlpha(material_.hairline, material_.hairline.a * settingsOpacity_), &divider);
@@ -9906,7 +9966,7 @@ class Renderer {
         const float chipH = 28.0f * scale;
         const float chipTop = bandBottom - chipH;
         const float chipRadius = std::min(InsetCardRadius(rect, scale) * 0.5f, chipH * 0.5f);
-        const float weights[3] = {1.4f, 1.0f, 1.0f};
+        const float weights[3] = {1.3f, 1.0f, 1.0f};
         const float chipSpan = (colRight - colLeft) - chipGap * 2.0f;
 
         const std::wstring windUnit = settings.weatherFahrenheit ? L" mph" : L" km/h";
@@ -9919,7 +9979,7 @@ class Renderer {
         IDWriteTextFormat* chipFmt = boldTextFormat_ ? boldTextFormat_.Get() : smallTextFormat_.Get();
         float chipX = colLeft;
         for (int i = 0; i < 3; ++i) {
-            const float chipW = chipSpan * weights[i] / 3.4f;
+            const float chipW = chipSpan * weights[i] / 3.3f;
             const D2D1_RECT_F chip = D2D1::RectF(chipX, chipTop, chipX + chipW, chipTop + chipH);
             DrawCard(chip, chipRadius);
             if (iconStrong) {
@@ -9933,8 +9993,8 @@ class Renderer {
                 chipFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 textBrush_->SetOpacity(0.94f);
                 target_->DrawTextW(values[i].c_str(), static_cast<UINT32>(values[i].size()), chipFmt,
-                                   D2D1::RectF(chip.left + 24.0f * scale, chip.top,
-                                               chip.right - 4.0f * scale, chip.bottom),
+                                   D2D1::RectF(chip.left + 22.0f * scale, chip.top,
+                                               chip.right - 3.0f * scale, chip.bottom),
                                    textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
                 chipFmt->SetTextAlignment(prevAlign);
                 chipFmt->SetParagraphAlignment(prevPara);
@@ -11142,7 +11202,8 @@ class Renderer {
         if (secondaryW > 0.0f) {
             row += gap + secondaryW;
         }
-        float primaryW = MeasureTextWidth(content.primary, textFormat_.Get());
+        float primaryW = MeasureTextWidth(content.primary,
+                                          content.primaryFormat ? content.primaryFormat : textFormat_.Get());
         if (primaryW > 0.0f) {
             primaryW = std::min(primaryW, std::max(24.0f, maxRow - row - gap));
             row += gap + primaryW;
@@ -11184,6 +11245,7 @@ class Renderer {
                     text = state.clipboard.image ? std::wstring(L"Image copied") : std::wstring(Loc(L"Copied"));
                 }
                 c.primary = text;
+                c.primaryFormat = clipboardTextFormat_.Get();
                 c.secondary = state.clipboard.appName;
                 break;
             }
@@ -11413,7 +11475,8 @@ class Renderer {
         if (primaryW > 0.0f) {
             x += gap;
             textBrush_->SetOpacity(0.96f);
-            DrawTrimmedText(c.primary, textFormat_.Get(), x, cy, primaryW, textBrush_.Get());
+            DrawTrimmedText(c.primary, c.primaryFormat ? c.primaryFormat : textFormat_.Get(), x, cy, primaryW,
+                            textBrush_.Get());
             x += primaryW;
         }
 
@@ -12222,7 +12285,8 @@ class Renderer {
             ? D2D1::RectF(tx, cy - 2.0f, rect.right - 14.0f, cy + 15.0f)
             : D2D1::RectF(tx, cy - 1.0f, rect.right - 14.0f, cy + 16.0f);
         DrawMarqueeText(state.clipboard.text.empty() ? std::wstring(Loc(L"Copied")) : state.clipboard.text,
-                        textRect, textFormat_.Get(), textBrush_.Get(), now, 34.0f, marqueeClipboardCache_);
+                        textRect, clipboardTextFormat_ ? clipboardTextFormat_.Get() : textFormat_.Get(),
+                        textBrush_.Get(), now, 34.0f, marqueeClipboardCache_);
 
         DrawCountdownProgress(tx, rect.right - 14.0f, rect.bottom - 6.0f, progress);
         mutedBrush_->SetOpacity(0.58f);
@@ -13013,6 +13077,7 @@ class Renderer {
     ComPtr<IDWriteTextFormat> calGridFormat_;
     ComPtr<IDWriteTextFormat> timeDashboardFormat_;
     ComPtr<IDWriteTextFormat> dateDashboardFormat_;
+    ComPtr<IDWriteTextFormat> clipboardTextFormat_;
     ComPtr<ID2D1SolidColorBrush> accentBrush_;
     ComPtr<ID2D1SolidColorBrush> redBrush_;
     ComPtr<ID2D1SolidColorBrush> textBrush_;
@@ -14316,6 +14381,41 @@ DWORD WINAPI RenderThreadProc(void*) {
                 }
                 nextFrameTarget = std::chrono::steady_clock::now();
                 continue;
+            }
+        }
+
+        // Screen snip (Win+Shift+S / Print Screen): get out of the way at once,
+        // without the collapse animation (the overlay appears instantly), and
+        // stay out -- no alerts, no topmost reclaim -- until it closes. Pending
+        // un-hide work below simply waits for the next iteration after it.
+        {
+            static bool hiddenForSnip = false;
+            static double lastSnipCheck = -1.0;
+            const double snipNow = NowSeconds();
+            if (hiddenForSnip || snipNow - lastSnipCheck > 0.15) {
+                lastSnipCheck = snipNow;
+                const bool snipActive = IsScreenSnipActive(hwnd);
+                if (snipActive) {
+                    if (!hiddenForSnip) {
+                        hiddenForSnip = true;
+                        ShowWindow(hwnd, SW_HIDE);
+                        g_audioCaptureNeeded.store(false, std::memory_order_relaxed);
+                        Wh_Log(L"Screen snip active: island hidden until it closes.");
+                    }
+                    setHighResTimer(false);
+                    WaitForSingleObject(g_stopEvent, 100);
+                    previousFrame = std::chrono::steady_clock::now();
+                    nextFrameTarget = previousFrame;
+                    continue;
+                }
+                if (hiddenForSnip) {
+                    hiddenForSnip = false;
+                    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                    EnsureTopmost(hwnd);
+                    g_layoutDirty = true;
+                    previousFrame = std::chrono::steady_clock::now();
+                    nextFrameTarget = previousFrame;
+                }
             }
         }
 
