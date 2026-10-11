@@ -427,21 +427,25 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
   - **Deteksi:**
     - `MediaThreadProc` menyimpan AUMID **semua** sesi SMTC yang `Playing` ke `g_state.playingMediaSources` tiap 1,5 detik, bukan hanya sesi yang diikuti pill.
     - `IsForegroundFullscreenVideo` bernilai true kalau `IsForegroundFullscreen` true (client rect jendela foreground menutupi monitornya) **dan** jendela itu milik salah satu sumber tersebut. Hasilnya sticky per HWND, jadi video yang di-pause tetap dianggap video sampai keluar dari fullscreen atau foreground berganti.
+    - **Sejak 1.7.4:** kalau tidak ada sesi Playing yang cocok, semua sesi SMTC (`mediaSessionSources`, termasuk yang Paused) juga dicek. Ini untuk video yang sedang di-pause dan browser seperti Zen/Firefox yang statusnya terlambat saat masuk fullscreen. Aplikasi fullscreen tanpa sesi media sama sekali (game, browser F11 yang tidak pernah memutar media) tetap menampilkan island normal.
   - **Pencocokan** `WindowBelongsToMediaSource`, berurutan:
     - (a) `WindowAppId`: properti `PKEY_AppUserModel_ID` jendela lewat `SHGetPropertyStoreForWindow`. Browser Chromium memakai id yang sama dengan SMTC.
     - (b) `PackagedAppIdForPid` (`GetApplicationUserModelId`) untuk aplikasi UWP. Frame `ApplicationFrameHost.exe` diganti proses child-nya lewat `FindFrameContentProc`, yang harus berupa fungsi `CALLBACK`, bukan lambda, karena build x86 butuh stdcall.
     - (c) Nama exe tanpa `.exe` yang muncul di AUMID, plus alias chrome, edge, dan vlc.
     - (d) Firefox: AUMID berupa hash hex (`LooksLikeFirefoxAumid`).
   - **Log diagnostik:**
-    - `Full-screen video detected (source "...")` muncul saat terdeteksi.
-    - `Full screen, not video: exe=... windowAppId=... packagedId=... playing=[...]` muncul sekali per jendela dan set sumber saat **tidak** cocok. Pakai log ini untuk menambah aturan pencocokan.
+    - `Full-screen video detected (source "...")` muncul saat terdeteksi (ditambah `, not playing` kalau cocoknya lewat sesi yang tidak Playing).
+    - `Full screen, not video: exe=... windowAppId=... packagedId=... sessions=[...]` muncul sekali per jendela dan set sesi saat **tidak** cocok; `sessions` berisi semua sesi SMTC. Pakai log ini untuk menambah aturan pencocokan.
+    - `Video line: fullscreenVideo=.. suppressed=.. line=.. hover=.. armed=.. alert=.. privacy=.. override=..` muncul setiap kali salah satu nilai itu berubah selama (atau tepat setelah) fullscreen video. Gunakan untuk melihat apakah deteksi gagal (`suppressed=0`) atau ada yang menahan island tetap besar.
+    - Contoh nyata: Zen (`zen.exe`) memakai AUMID hex yang sama dengan `windowAppId`-nya (misalnya `F81484BD793E1A42`), jadi cocok lewat langkah (a).
   - **Perilaku saat `videoSuppressed`** (render loop):
     - `videoLine` memaksa `minimizedLine`.
     - `edgeSpring` menggeser island ke tepi seperti mode minimize.
     - `renderer.SetLineMode` memastikan transisi tetap digambar sebagai garis.
     - **Hover membuka card (sejak 1.7.4)**, sama seperti minimize manual: `isHoverExpanded = hover`, lalu `videoHoverOpen` mengizinkan ukuran expanded walaupun `isFullscreen`. Hover baru dihitung setelah island benar-benar menjadi garis (`videoLineArmed`, di-set saat `heightSpring < 30` dan di-reset saat keluar fullscreen). Tanpa ini, kursor yang kebetulan ada di atas island saat video masuk fullscreen membuat island tidak pernah mengecil. Pin tetap diabaikan.
     - `recentTrackChange` dimatikan, dan `inlineAlert` / `isTransientAlert` hanya untuk Volume.
-    - Volume muncul sebagai pill sebentar lalu kembali menjadi garis. Titik privasi menampilkan pill collapsed.
+    - Volume muncul sebagai pill sebentar lalu kembali menjadi garis.
+    - **Titik privasi tidak lagi menahan pill (sejak 1.7.4).** Titiknya digambar di ujung garis (`DrawMinimizedLine`). Dulu mic yang dipakai terus (misalnya Discord) membuat island tidak pernah menjadi garis di atas video.
     - Sejak 1.7.4 garis ini tidak ikut auto-hide idle (`isHidden = false`), sama seperti minimize manual, supaya selalu bisa di-hover.
     - `EnsureTopmost` tetap berjalan supaya garis berada di atas player.
   - Hotkey hide/show memaksa island normal (`g_fullscreenOverrideVisible`). Status ini direset saat keluar dari fullscreen.
@@ -524,7 +528,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | Blur/acrylic hilang atau kotak | `Backdrop` namespace, `ApplyBackdropRegion` | `SetWindowCompositionAttribute` (**undocumented**) |
 | Island tertutup window lain | `EnsureTopmost`, `PositionOverlayWindow` | z-order `HWND_TOPMOST` |
 | Fullscreen auto-hide salah (deteksi fullscreen) | `IsForegroundFullscreen` | perbandingan rect monitor dan class window |
-| Video fullscreen tidak menyembunyikan island / game ikut tersembunyi | `IsForegroundFullscreenVideo`, `WindowBelongsToMediaSource`, `playingMediaSources` di `MediaThreadProc` | format AUMID SMTC per browser/aplikasi, `GetApplicationUserModelId`, `ApplicationFrameHost` |
+| Video fullscreen tidak menyembunyikan island / game ikut tersembunyi | `IsForegroundFullscreenVideo`, `WindowBelongsToMediaSource`, `playingMediaSources` / `mediaSessionSources` di `MediaThreadProc`; log `Video line:` | format AUMID SMTC per browser/aplikasi, `GetApplicationUserModelId`, `ApplicationFrameHost` |
 | Garis tidak terbuka saat hover di atas video fullscreen / island tidak menjadi garis | `videoSuppressed`, `videoLineArmed`, `videoHoverOpen`, `videoLine`, `edgeSpring` di render loop | — |
 | Video tertentu tidak terdeteksi | baca log `Full screen, not video:` lalu tambah aturan di `WindowBelongsToMediaSource` | AUMID SMTC vs `PKEY_AppUserModel_ID` |
 | Cuaca tidak mengikuti lokasi laptop | `QueryWindowsLocation` (cek log `Weather: Windows location ...`), urutan fallback di `WeatherThreadProc` | `Windows.Devices.Geolocation`, izin lokasi desktop app |
@@ -547,7 +551,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | 1.4.0 | **Lirik LRCLIB** di pill collapsed (+ toggle, cache, retry); pembacaan cover bertahap; **cover cadangan iTunes**; `HttpGet` aman untuk biner + timeout; lebar pill dinamis mengikuti lirik (lead 0,35 detik, jeda ≥ 4 detik kembali normal); setting **Lyrics delay (ms)** |
 | 1.5.0 | **Minimize**: garis glass + waveform, menempel 3px dari tepi layar, hitbox kecil tanpa jeda, hover membuka card |
 | 1.6.0 | **Notifikasi inline** di tengah pill musik (tanpa pill kedua, lebar mengikuti notifikasi, maks 460); **tab Aktivitas** untuk Timer/Progress; durasi notifikasi sesaat maksimal 3 detik |
-| 1.7.4 | **Ganti player**: panah di baris scrubber untuk memilih sesi SMTC yang diikuti island (`pinnedMediaSource`, `SwitchMediaSession`, command 5/6), poll media seketika lewat `g_mediaRefreshEvent`; card expanded 400px; teks waktu dan ujung scrubber mengikuti panah dengan jarak sama di kedua sisi. **Garis fullscreen video bisa di-hover** untuk membuka card (setelah island menjadi garis), dan tidak lagi ikut auto-hide idle |
+| 1.7.4 | **Ganti player**: panah di baris scrubber untuk memilih sesi SMTC yang diikuti island (`pinnedMediaSource`, `SwitchMediaSession`, command 5/6), poll media seketika lewat `g_mediaRefreshEvent`; card expanded 400px; teks waktu dan ujung scrubber mengikuti panah dengan jarak sama di kedua sisi. **Garis fullscreen video bisa di-hover** untuk membuka card (setelah island menjadi garis), dan tidak lagi ikut auto-hide idle. Titik privasi (mic/kamera) tidak lagi menahan pill di atas video; deteksi video juga menerima sesi yang tidak Playing (Zen/Firefox, video di-pause); log diagnostik `Video line:` |
 | 1.7.3 | Teks notif clipboard 12px (`clipboardTextFormat_`, juga di pill inline lewat `InlineAlertContent::primaryFormat`); **island sembunyi langsung saat overlay screenshot** (`IsScreenSnipActive`, tanpa topmost/alert sampai selesai; tidak di-exclude dari capture); kotak tanggal tab Tanggal & Cuaca 112px; tombol volume di 100%/0% tetap memunculkan pill |
 | 1.7.2 | Chip cuaca kembali sederhana (glyph + angka), ikon cuaca 60px. **Fallback Open-Meteo** saat wttr.in gagal/timeout (`FetchOpenMeteo`, `GeocodeCityOpenMeteo`, `WmoToWwoCode`); wttr.in dilewati selama 1 jam setelah gagal. Log: `Weather: Requesting fallback from api.open-meteo.com`, `Weather parsed success (Open-Meteo)` |
 | 1.7.1 | Revisi tab Tanggal & Cuaca: sudut kartu konsentris dengan island (`InsetCardRadius`); ikon cuaca 52px dan suhu 63px; tile kompas angin / termometer terasa / ring kelembapan menggantikan chip polos |

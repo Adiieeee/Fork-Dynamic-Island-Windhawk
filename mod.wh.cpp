@@ -171,7 +171,7 @@ We love community contributions! To ensure high-quality updates, please follow t
       - '60': Hide after 60 seconds
   - AutoHideFullscreen: true
     $name: Minimize on full screen video
-    $description: While a video plays in full screen (YouTube, Netflix, VLC and other players) the island shrinks to the thin minimized line at the top edge; hover the line to open the full island. Games and other full-screen apps keep the normal island. Only volume changes and the mic/camera privacy dot still surface over a full-screen video. The Windhawk log names any full-screen window that was not recognised as video.
+    $description: While a video plays in full screen (YouTube, Netflix, VLC and other players) the island shrinks to the thin minimized line at the top edge; hover the line to open the full island. Games and other full-screen apps keep the normal island. Only volume changes still surface over a full-screen video; the mic/camera privacy dot shows on the line. The Windhawk log names any full-screen window that was not recognised as video.
   - UnhideOnHover: true
     $name: Unhide on hover
     $description: Allow the hidden island to reappear when you hover your mouse over it.
@@ -3748,8 +3748,9 @@ bool WindowBelongsToMediaSource(HWND hwnd, const std::wstring& aumid) {
 }
 
 // "Hide on full screen" only applies to video: true when the foreground window
-// covers its monitor AND belongs to an app with a playing media session.
-// Games, a browser in F11 with nothing playing, etc. keep the island.
+// covers its monitor AND belongs to an app with a media session (a playing one
+// preferred). Games, a browser in F11 with no media session, etc. keep the
+// island.
 //
 // Sticky per window: once a full-screen window has been seen playing, it stays
 // "video" while it remains full screen and in front, so pausing the video does
@@ -3766,10 +3767,17 @@ bool IsForegroundFullscreenVideo(HWND overlay) {
         return true;
     }
 
+    // Playing sessions first; then any session at all (paused, or a browser
+    // such as Zen/Firefox whose status lags behind entering full screen), so a
+    // full-screen player is still recognised. A full-screen app with no media
+    // session -- a game, a browser in F11 that never played anything -- still
+    // keeps the normal island.
     std::vector<std::wstring> sources;
+    std::vector<std::wstring> allSessions;
     {
         std::lock_guard lock(g_stateMutex);
         sources = g_state.playingMediaSources;
+        allSessions = g_state.mediaSessionSources;
     }
     for (const std::wstring& source : sources) {
         if (WindowBelongsToMediaSource(fg, source)) {
@@ -3778,15 +3786,23 @@ bool IsForegroundFullscreenVideo(HWND overlay) {
             return true;
         }
     }
+    for (const std::wstring& source : allSessions) {
+        if (WindowBelongsToMediaSource(fg, source)) {
+            videoWindow = fg;
+            Wh_Log(L"Full-screen video detected (source \"%s\", not playing)", source.c_str());
+            return true;
+        }
+    }
     videoWindow = nullptr;
 
     // Diagnostics for a full-screen window that was NOT recognised as video:
-    // logged once per window + playing-source set, so a browser or player whose
-    // ids do not line up can be matched up from the Windhawk log.
+    // logged once per window + session set, so a browser or player whose ids
+    // do not line up can be matched up from the Windhawk log. "sessions" lists
+    // every session (they all failed to match), playing or not.
     static HWND loggedWindow = nullptr;
     static std::wstring loggedSources;
     std::wstring joined;
-    for (const std::wstring& source : sources) {
+    for (const std::wstring& source : allSessions) {
         if (!joined.empty()) {
             joined += L" | ";
         }
@@ -3799,7 +3815,7 @@ bool IsForegroundFullscreenVideo(HWND overlay) {
         ProcessImageNameForWindow(fg, &image);
         DWORD pid = 0;
         GetWindowThreadProcessId(fg, &pid);
-        Wh_Log(L"Full screen, not video: exe=\"%s\" windowAppId=\"%s\" packagedId=\"%s\" playing=[%s]",
+        Wh_Log(L"Full screen, not video: exe=\"%s\" windowAppId=\"%s\" packagedId=\"%s\" sessions=[%s]",
                BaseNameFromPath(image).c_str(), WindowAppId(fg).c_str(),
                PackagedAppIdForPid(pid).c_str(), joined.c_str());
     }
@@ -14718,8 +14734,8 @@ DWORD WINAPI RenderThreadProc(void*) {
         // Over a full-screen video the island shrinks to the minimized line at
         // the screen edge. Hovering the line opens the card, as in minimized
         // mode, but pin does not and no alerts surface -- except a volume
-        // change (the Windows OSD is suppressed, so this is the only feedback)
-        // and the privacy dot.
+        // change (the Windows OSD is suppressed, so this is the only feedback).
+        // The privacy dot shows on the line itself.
         const bool videoSuppressed =
             isFullscreen && !g_fullscreenOverrideVisible.load(std::memory_order_relaxed);
         const bool volumeAlertActive =
@@ -14971,7 +14987,28 @@ DWORD WINAPI RenderThreadProc(void*) {
         // Minimized and nothing asking for attention: rest as the thin line.
         // Transient alerts still surface at their normal size, then the island
         // springs back down to the line once they expire.
-        const bool videoLine = videoSuppressed && !isTransientAlert && !privacyActive && !videoHoverOpen;
+        // The mic/camera dot does not hold the island open: DrawMinimizedLine
+        // draws it at the end of the line. (It used to, which kept the pill up
+        // over every video while e.g. Discord held the microphone.)
+        const bool videoLine = videoSuppressed && !isTransientAlert && !videoHoverOpen;
+
+        // Diagnostics for "the island does not minimize over a full-screen
+        // video": logged only when one of the inputs changes, so the Windhawk
+        // log shows whether detection failed (videoSuppressed=0) or something
+        // held the island open (hover / alert / privacy).
+        {
+            static int lastVideoDiag = -1;
+            const int diag = (isFullscreen ? 1 : 0) | (videoSuppressed ? 2 : 0) | (videoLine ? 4 : 0) |
+                             (hover ? 8 : 0) | (videoLineArmed ? 16 : 0) | (isTransientAlert ? 32 : 0) |
+                             (privacyActive ? 64 : 0);
+            if (diag != lastVideoDiag && (isFullscreen || lastVideoDiag > 0)) {
+                Wh_Log(L"Video line: fullscreenVideo=%d suppressed=%d line=%d hover=%d armed=%d alert=%d privacy=%d override=%d",
+                       isFullscreen ? 1 : 0, videoSuppressed ? 1 : 0, videoLine ? 1 : 0, hover ? 1 : 0,
+                       videoLineArmed ? 1 : 0, isTransientAlert ? 1 : 0, privacyActive ? 1 : 0,
+                       g_fullscreenOverrideVisible.load() ? 1 : 0);
+            }
+            lastVideoDiag = diag;
+        }
         const bool minimizedLine =
             videoLine || (minimizedMode && !isHoverExpanded && !pinned && !isTransientAlert);
         if (minimizedLine) {
