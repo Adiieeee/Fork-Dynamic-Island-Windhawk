@@ -2,7 +2,7 @@
 
 Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rusak (misalnya setelah update Windows), dokumen ini menjelaskan **perilaku yang seharusnya**, **di mana kodenya**, dan **API Windows apa yang dipakai**, supaya perbaikan bisa mengembalikan fungsi yang sama persis.
 
-- **Versi kode saat dokumen ditulis:** `1.7.3` (header `@version`), sekitar 14.900 baris.
+- **Versi kode saat dokumen ditulis:** `1.7.4` (header `@version`), sekitar 15.700 baris.
 - **Nomor baris** di bawah berlaku untuk versi ini dan akan bergeser saat kode berubah. **Selalu cari nama fungsinya** (misalnya `grep -n "DrawMinimizedLine" mod.wh.cpp`). Nama fungsi adalah acuan utama; nomor baris hanya petunjuk awal.
 - Konvensi umum proyek (proses tool-mod, threading, lokalisasi) juga diringkas di `CLAUDE.md`.
 
@@ -53,7 +53,7 @@ Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rus
 "/c/Program Files/Windhawk/Compiler/bin/clang++.exe" -fsyntax-only -Wall -std=c++23 \
   -target x86_64-w64-mingw32 -DWH_MOD -DUNICODE -D_UNICODE \
   -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
-  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.3"' \
+  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.4"' \
   -include windhawk_api.h -x c++ mod.wh.cpp
 ```
 
@@ -78,7 +78,7 @@ Semua thread dibuat di `StartThreads()` (±14636) dan dihentikan oleh `StopThrea
 | Thread | Fungsi (±baris) | Tugas |
 |---|---|---|
 | Render | `RenderThreadProc` (13616) | membuat window overlay, memiliki `Renderer`, menjalankan frame loop, dan memproses pesan window |
-| Media | `MediaThreadProc` (3889) | poll SMTC tiap 1,5 detik: judul, artis, album, cover, posisi |
+| Media | `MediaThreadProc` (4208) | poll SMTC tiap 1,5 detik (atau seketika lewat `g_mediaRefreshEvent` saat player diganti): judul, artis, album, cover, posisi, daftar semua sesi |
 | Audio | `AudioThreadProc` (5853) | WASAPI loopback untuk data waveform (hanya saat `g_audioCaptureNeeded`) |
 | Cuaca | `WeatherThreadProc` (5337) | WinHTTP ke wttr.in, `Geolocator` (opsional) |
 | Lirik | `LyricsThreadProc` (5573) | LRCLIB untuk lirik ber-timestamp |
@@ -92,9 +92,9 @@ Semua thread dibuat di `StartThreads()` (±14636) dan dihentikan oleh `StopThrea
 DND tidak memakai thread sendiri, tapi subscription WNF (`SubscribeDndNotification`, ±4199).
 
 ### 2.3 State bersama
-- **`SharedState g_state`** (struct ±1236) dijaga **`g_stateMutex`**. Isinya: `media`, `lyrics`, `clipboard`, `notification`, `volume`, `capsLock`, `timer`, `device`, `bluetoothDevice`, `doNotDisturb`, `battery`, `progress`, `system` (CPU/RAM/GPU/disk/net/volume/privasi/renderFps), `weather`, `waveform[48]` (ring buffer, ditulis lewat `waveformWrite`), dan `fileTrayItems`.
+- **`SharedState g_state`** (struct ±1236) dijaga **`g_stateMutex`**. Isinya: `media`, `lyrics`, `clipboard`, `notification`, `volume`, `capsLock`, `timer`, `device`, `bluetoothDevice`, `doNotDisturb`, `battery`, `progress`, `system` (CPU/RAM/GPU/disk/net/volume/privasi/renderFps), `weather`, `waveform[48]` (ring buffer, ditulis lewat `waveformWrite`), `fileTrayItems`, serta (sejak 1.7.4) `playingMediaSources`, `mediaSessionSources` (AUMID semua sesi SMTC, tanpa duplikat) dan `pinnedMediaSource` (player yang dipilih lewat panah, kosong = otomatis).
 - **`Settings g_settings`** (struct ±945) dijaga `g_settingsMutex`. Render loop memakai `GetSettingsCopy()` (±1303) sekali per frame.
-- **Atomic global penting** (±1290–1340): `g_layoutDirty` (minta repaint/reposisi), `g_idleTab` (tab dashboard aktif), `g_hoveredMediaButton` / `g_pressedMediaButton`, `g_scrubbing`, `g_manuallyHidden`, `g_autoHiddenParked`, `g_lyricsEnabled`, `g_lyricsDelayMs`, `g_islandMinimized`, `g_minimizedEdgeFraction`, `g_activityTabVisible`, `g_audioCaptureNeeded`.
+- **Atomic global penting** (±1290–1340): `g_layoutDirty` (minta repaint/reposisi), `g_idleTab` (tab dashboard aktif), `g_hoveredMediaButton` / `g_pressedMediaButton`, `g_scrubbing`, `g_manuallyHidden`, `g_autoHiddenParked`, `g_lyricsEnabled`, `g_lyricsDelayMs`, `g_islandMinimized`, `g_minimizedEdgeFraction`, `g_activityTabVisible`, `g_audioCaptureNeeded`, `g_mediaSessionCount` (jumlah player, untuk menampilkan panah ganti player), `g_scrubInsetLeft` / `g_scrubInsetRight` (posisi ujung scrubber yang benar-benar digambar).
 
 ### 2.4 Pesan window (`OverlayWndProc`, ±12972)
 
@@ -119,7 +119,9 @@ DND tidak memakai thread sendiri, tapi subscription WNF (`SubscribeDndNotificati
 ID `WM_APP` yang terpakai: `+0x442` LAYOUT_CHANGED, `+0x443` NEW_EVENT, `+0x444` CAPSLOCK, `+0x446` MOUSE_WAKE, `+0x447` APPLY_HOTKEY, `+0x448` APPLY_BACKDROP, `+0x449` VOLUME_KEY.
 
 ### 2.5 Kopling layout ↔ hit-test
-Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLayout` (±559), `FileTrayLayout` (±644), `IdleStripLayout` (±681), dan `GameOverlayLayout` (±715). Hit-test media memakai `MediaContentFromClient` (±1615), yang membaca geometri frame terakhir lewat seqlock, lalu `MediaTransportHitTest` (±1674), `MediaScrubFractionFromContent` (±1706), dan `MediaArtHitTest`.
+Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLayout` (±559), `FileTrayLayout` (±644), `IdleStripLayout` (±681), dan `GameOverlayLayout` (±715). Hit-test media memakai `MediaContentFromClient`, yang membaca geometri frame terakhir lewat seqlock, lalu `MediaTransportHitTest` (±1725), `MediaScrubFractionFromContent` (±1767), dan `MediaArtHitTest`.
+
+**Pengecualian (1.7.4):** saat panah ganti player tampil, ujung scrubber mengikuti lebar teks waktu yang diukur, jadi tidak bisa berupa konstanta. `DrawMedia` menulis posisinya ke `g_scrubInsetLeft` / `g_scrubInsetRight`, dan hit-test scrubber membaca atomic itu.
 
 **Aturan:** kalau mengubah posisi elemen, ubah konstantanya, jangan angka lepas di `Draw*`, supaya area klik tidak bergeser dari gambarnya.
 
@@ -139,13 +141,13 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
    - `ActivityForKind` (±12595) memberi ukuran dasar per jenis.
    - `ChooseInlineAlert` (±12676) memilih notifikasi yang digambar **di dalam** pill musik (§8).
    - `g_activityTabVisible` = timer atau progress aktif (§10).
-5. **Hover:** rect pill dihitung dari `GetWindowRect`, ditambah padding saat mode minimize (§7). `isHoverExpanded` mengikuti setting Expand-on-hover (atau klik), dan dipaksa `hover` saat minimize.
+5. **Hover:** rect pill dihitung dari `GetWindowRect`, ditambah padding saat garis minimize (§7), baik minimize manual maupun garis fullscreen video. `isHoverExpanded` mengikuti setting Expand-on-hover (atau klik), dan dipaksa `hover` saat minimize atau `videoSuppressed`.
 6. **Auto-hide / fullscreen video:** `IsForegroundFullscreenVideo` (±3659) dicek tiap 0,5 detik **sebelum** `ChooseInlineAlert` (±14183), lalu menghasilkan `videoSuppressed` (±14178). Saat video, island menjadi garis minimize. Setelah itu `isHidden` dan `EnsureTopmost` (tiap 1 detik). Detail: §12 "Fullscreen video".
 7. **Poll sistem tiap 1 detik:** `UpdateSystemSnapshot` (±6124) membaca CPU, RAM, disk, dan level volume. GPU dan jaringan hanya dibaca kalau tab Hardware atau game overlay tampil.
 8. **Ukuran target:**
    - Idle: `MeasureIdleStrip`.
    - Game overlay: `GameOverlayLayout`.
-   - Media: 380×184 saat expanded, atau lebar notifikasi inline.
+   - Media: 400×184 saat expanded (380 sebelum 1.7.4), atau lebar notifikasi inline.
    - Minimize: garis 160×8.
    - Hidden: 0×0.
 9. **Spring:** `widthSpring`, `heightSpring`, `nudgeSpring`, dan `edgeSpring` (untuk minimize). Kekakuan dan redaman mengikuti `AnimationStyle` (Smooth/Default/Bouncy/Snappy) dan `AnimationSpeed`.
@@ -160,7 +162,13 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 ## 4. Fitur: Media
 
 **Sumber data:** Windows **SMTC** (`GlobalSystemMediaTransportControlsSessionManager`) di `MediaThreadProc` (±3889), dengan poll tiap 1,5 detik.
-- `SelectActiveMediaSession` (±3851) memilih sesi yang sedang aktif.
+- `SelectActiveMediaSession` (±4143) memilih sesi yang diikuti island:
+  1. player yang dipilih pengguna lewat panah (`pinnedMediaSource`), selama sesinya masih ada; kalau satu AUMID punya beberapa sesi (browser), yang sedang Playing diutamakan;
+  2. `GetCurrentSession()` kalau sedang Playing;
+  3. sesi pertama yang Playing;
+  4. `GetCurrentSession()`.
+
+  Kalau player yang dipilih ditutup, `pinnedMediaSource` dikosongkan dan pemilihan kembali otomatis.
 - Data yang dibaca: `title`, `artist`, `albumTitle`, `sourceAppUserModelId`, `PlaybackStatus`, timeline (`positionTicks`, `endTicks`, `lastUpdatedTicks`), dan thumbnail (cover).
 - **Fallback VLC:** kalau judul kosong dari VLC, judul diambil dari caption window VLC.
 - **Ikon sumber:** `FindMediaSourceIcon` (±3681), dengan badge teks (misalnya "SP") sebagai cadangan.
@@ -170,8 +178,9 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 - Tengah: **notifikasi inline** (§8) kalau ada; selain itu **lirik** (§5).
 - Lebar dasar `MediaLayout::kCollapsedWidth` = 150. Dengan lirik: `kCollapsedLyricsWidth` = 320.
 
-**Card expanded (hover atau pin):** 380×184 (`kExpandedWidth`/`kExpandedHeight`).
-- Art 64px, judul/artis/album dengan marquee, waveform, scrubber (bisa di-drag untuk seek lewat `SeekMediaToTicks`, ±7042), elapsed/remaining.
+**Card expanded (hover atau pin):** 400×184 (`kExpandedWidth`/`kExpandedHeight`). Sejak 1.7.4 lebarnya 400 (sebelumnya 380) supaya panah ganti player tidak mepet ke tepi; tab lain ikut 400 karena digambar relatif ke rect card.
+- Art 64px, judul/artis/album dengan marquee, waveform, scrubber (bisa di-drag untuk seek lewat `SeekMediaToTicks`), elapsed/remaining.
+- Jarak scrubber ke tepi: `kScrubMargin` 24 + `kScrubBarLeftInset`/`kScrubBarRightInset` 56 (48 sebelum 1.7.4).
 - Baris kontrol (y = `kControlsY` 148, x relatif ke tengah):
 
 | Offset X | Tombol | Command hit-test |
@@ -182,8 +191,19 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 | +64 | Next | 2 |
 | +118 | **Lirik** toggle (`DrawLyricsToggleButton`, ±11173) | 3 |
 
-- Command 0–2 dikirim lewat `SendMediaTransportCommand` (±7108, SMTC `TrySkipPrevious`/`TryTogglePlayPause`/`TrySkipNext`). Command 3 dan 4 ditangani lokal di `WM_LBUTTONUP`.
-- Animasi tekan: `mediaBtnPress_[5]` dan `UpdateMediaButtonAnimations` (±11088).
+- Command 0–2 dikirim lewat `SendMediaTransportCommand` (±7738, SMTC `TrySkipPrevious`/`TryTogglePlayPause`/`TrySkipNext`) ke sesi yang ditampilkan island (`ResolveMediaSession`, dicocokkan lewat AUMID). Command 3–6 ditangani lokal di `WM_LBUTTONUP`.
+- Animasi tekan: `mediaBtnPress_[7]` dan `UpdateMediaButtonAnimations`.
+
+**Ganti player (1.7.4):** kalau ada lebih dari satu aplikasi dengan sesi SMTC (misalnya Spotify dan YouTube di browser), panah `‹` / `›` muncul di baris scrubber.
+
+| Bagian | Keterangan |
+|---|---|
+| Posisi | `kSessionArrowInsetX` 20 dari tepi kiri/kanan card, y = `kSessionArrowY` (= `kScrubberY` 114). Hit box ±`kSessionArrowHitHalf` 12 |
+| Command | 5 = player sebelumnya, 6 = player berikutnya (`MediaTransportHitTest`, hanya kalau `g_mediaSessionCount > 1`) |
+| Gambar | `DrawSessionArrow` (±11815): chevron, latar bulat saat hover/tekan |
+| Teks waktu | saat panah tampil, elapsed rata kiri dan remaining rata kanan pada `kSessionTimeInsetX` 32, jadi jarak panah–waktu sama di kedua sisi. Ujung scrubber = teks waktu (diukur `MeasureTextWidth`) + 8px, jadi jarak waktu–bar juga sama. Tanpa panah, teks waktu kembali menempel ke bar dengan inset tetap |
+| Klik | `SwitchMediaSession` (±7710) memutar indeks di `mediaSessionSources` mulai dari sesi yang sedang tampil, menyimpan AUMID ke `pinnedMediaSource`, lalu `SetEvent(g_mediaRefreshEvent)` supaya `MediaThreadProc` langsung poll ulang |
+| Batasan | pilihan per sesi (tidak disimpan, reset saat restart). Beberapa tab dari browser yang sama memakai satu AUMID, jadi dihitung satu player |
 - Klik area kosong card membuka aplikasi media (`OpenRelevantApp`, ±7219).
 
 **Pengaturan terkait:**
@@ -255,7 +275,7 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 - **Hover:** hitbox = garis + 4px ke samping + 4px ke bawah + sampai tepi layar, **tanpa jeda**. Hover selalu membuka card penuh, walaupun Expand-on-hover mati. Card terbuka dari tepi atas, dan menutup lagi saat mouse keluar card.
 - Island tetap di tepi selama minimize, juga saat terbuka, supaya tidak terjadi loop buka-tutup.
 - Notifikasi sesaat tetap memunculkan pill, lalu kembali jadi garis.
-- Garis tidak ikut auto-hide idle. Saat fullscreen video, island juga otomatis menjadi garis ini (§12), tapi hover tidak membukanya.
+- Garis tidak ikut auto-hide idle. Saat fullscreen video, island juga otomatis menjadi garis ini (§12), dan sejak 1.7.4 hover juga membukanya.
 - Tidak berlaku saat game overlay aktif.
 
 **Kode:**
@@ -265,14 +285,14 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 | Konstanta `MediaLayout` | 590–612 | `kMinimizeButtonOffsetX` −118, `kMinimizedLineWidth` 160, `kMinimizedLineHeight` 8, `kMinimizedHoverPadX` 4, `kMinimizedHoverPadBelow` 4, `kMinimizedLineEdgeGap` 3 |
 | `g_islandMinimized`, `g_minimizedEdgeFraction` | 1332 / 1336 | state dan fraksi animasi ke tepi (0..1) |
 | `PositionOverlayWindow` | 2779 | menggeser `y` window sebesar `shift × edgeFraction` agar garis 3px dari tepi |
-| Render loop: hover (`lineResting`) | 13976 | hitbox diperlebar saat `heightSpring < 30` |
+| Render loop: hover (`lineResting`) | ±14780 | hitbox diperlebar saat `heightSpring < 30`, untuk minimize manual maupun `videoSuppressed` |
 | Render loop: `minimizedMode` | 14047 | `isHoverExpanded = hover`, `isHidden = false` |
 | Render loop: `minimizedLine` | 14175 | override ukuran ke garis, `renderer.SetMinimizedLine` |
 | Render loop: `edgeSpring` | 14266 | spring critically damped, set `g_layoutDirty` saat bergerak |
 | `Renderer::Render` | 7687 | menggambar garis (`DrawMinimizedLine`) saat `minimizedLine_` aktif atau tinggi < 24 dalam mode minimize |
 | `DrawMinimizedLine` | 11575 | isi pill alpha 0.5, kilau gradient putih 0.16→0, batang waveform 1.6px |
 | `WM_LBUTTONUP` cmd 4 | 13481 | toggle dan simpan |
-| `expanded` saat klik | 13430 | minimize dianggap expanded supaya klik pertama tidak "dimakan" |
+| `expanded` saat klik | `WM_LBUTTONUP` | minimize dan garis fullscreen video dianggap expanded supaya klik pertama tidak "dimakan" |
 
 ---
 
@@ -419,10 +439,10 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
     - `videoLine` memaksa `minimizedLine`.
     - `edgeSpring` menggeser island ke tepi seperti mode minimize.
     - `renderer.SetLineMode` memastikan transisi tetap digambar sebagai garis.
-    - `hover` dipaksa false, jadi garis tidak terbuka saat di-hover. Pin juga diabaikan.
+    - **Hover membuka card (sejak 1.7.4)**, sama seperti minimize manual: `isHoverExpanded = hover`, lalu `videoHoverOpen` mengizinkan ukuran expanded walaupun `isFullscreen`. Hover baru dihitung setelah island benar-benar menjadi garis (`videoLineArmed`, di-set saat `heightSpring < 30` dan di-reset saat keluar fullscreen). Tanpa ini, kursor yang kebetulan ada di atas island saat video masuk fullscreen membuat island tidak pernah mengecil. Pin tetap diabaikan.
     - `recentTrackChange` dimatikan, dan `inlineAlert` / `isTransientAlert` hanya untuk Volume.
     - Volume muncul sebagai pill sebentar lalu kembali menjadi garis. Titik privasi menampilkan pill collapsed.
-    - Auto-hide idle tetap berlaku untuk garis ini, tidak seperti mode minimize manual.
+    - Sejak 1.7.4 garis ini tidak ikut auto-hide idle (`isHidden = false`), sama seperti minimize manual, supaya selalu bisa di-hover.
     - `EnsureTopmost` tetap berjalan supaya garis berada di atas player.
   - Hotkey hide/show memaksa island normal (`g_fullscreenOverrideVisible`). Status ini direset saat keluar dari fullscreen.
   - `g_isFullscreen` / `isFullscreen` berarti "fullscreen video". Gate lain yang memakainya (game overlay, HW monitor) otomatis tidak aktif di game fullscreen. `parkedForFullscreen` sekarang selalu false (island tidak lagi di-park saat video).
@@ -488,6 +508,8 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | Pill volume tidak muncul di 100%/0% | `ApplyVolumeKey` (sejak 1.7.3 langsung memanggil `ReportVolumeChange` setelah tiap tombol) | `IAudioEndpointVolume` |
 | Island tidak muncul sama sekali | `Wh_ModInit`/`Wh_ModAfterInit` (model tool-mod), `RenderThreadProc` (pembuatan window), `Renderer::Initialize` | Windhawk tool-mod, `CreateProcessInternalW`, D2D/DWrite, `UpdateLayeredWindow` |
 | Pill musik/judul kosong | `MediaThreadProc`, `SelectActiveMediaSession` | WinRT `Windows.Media.Control` (SMTC) |
+| Panah ganti player tidak muncul / tidak berpindah | `mediaSessionSources` dan `g_mediaSessionCount` di `MediaThreadProc`, `SwitchMediaSession`, `pinnedMediaSource` di `SelectActiveMediaSession` | SMTC `GetSessions`, `SourceAppUserModelId` |
+| Klik scrubber meleset dari bar | `g_scrubInsetLeft` / `g_scrubInsetRight` (ditulis `DrawMedia`, dibaca `MediaScrubFractionFromContent` / `MediaScrubFractionUnbounded`) | — |
 | Cover selalu badge | `ReadWinRtStreamBytes`, `DecodeImageBytesToPixels`, `ArtworkThreadProc` | `Windows.Storage.Streams`, WIC |
 | Tombol prev/play/next tidak bekerja | `SendMediaTransportCommand`, `ResolveMediaSession` | SMTC `Try*Async` |
 | Waveform diam | `AudioThreadProc`, `g_audioCaptureNeeded` | WASAPI loopback |
@@ -503,7 +525,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | Island tertutup window lain | `EnsureTopmost`, `PositionOverlayWindow` | z-order `HWND_TOPMOST` |
 | Fullscreen auto-hide salah (deteksi fullscreen) | `IsForegroundFullscreen` | perbandingan rect monitor dan class window |
 | Video fullscreen tidak menyembunyikan island / game ikut tersembunyi | `IsForegroundFullscreenVideo`, `WindowBelongsToMediaSource`, `playingMediaSources` di `MediaThreadProc` | format AUMID SMTC per browser/aplikasi, `GetApplicationUserModelId`, `ApplicationFrameHost` |
-| Garis terbuka saat hover di atas video fullscreen / island tidak menjadi garis | `videoSuppressed`, `videoLine`, `edgeSpring` di render loop | — |
+| Garis tidak terbuka saat hover di atas video fullscreen / island tidak menjadi garis | `videoSuppressed`, `videoLineArmed`, `videoHoverOpen`, `videoLine`, `edgeSpring` di render loop | — |
 | Video tertentu tidak terdeteksi | baca log `Full screen, not video:` lalu tambah aturan di `WindowBelongsToMediaSource` | AUMID SMTC vs `PKEY_AppUserModel_ID` |
 | Cuaca tidak mengikuti lokasi laptop | `QueryWindowsLocation` (cek log `Weather: Windows location ...`), urutan fallback di `WeatherThreadProc` | `Windows.Devices.Geolocation`, izin lokasi desktop app |
 | Hardware monitor 0/kosong | `GetGpuUsage`, `GetNetworkUsage` | PDH counter berbahasa Inggris (`PdhAddEnglishCounterW`) |
@@ -525,6 +547,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | 1.4.0 | **Lirik LRCLIB** di pill collapsed (+ toggle, cache, retry); pembacaan cover bertahap; **cover cadangan iTunes**; `HttpGet` aman untuk biner + timeout; lebar pill dinamis mengikuti lirik (lead 0,35 detik, jeda ≥ 4 detik kembali normal); setting **Lyrics delay (ms)** |
 | 1.5.0 | **Minimize**: garis glass + waveform, menempel 3px dari tepi layar, hitbox kecil tanpa jeda, hover membuka card |
 | 1.6.0 | **Notifikasi inline** di tengah pill musik (tanpa pill kedua, lebar mengikuti notifikasi, maks 460); **tab Aktivitas** untuk Timer/Progress; durasi notifikasi sesaat maksimal 3 detik |
+| 1.7.4 | **Ganti player**: panah di baris scrubber untuk memilih sesi SMTC yang diikuti island (`pinnedMediaSource`, `SwitchMediaSession`, command 5/6), poll media seketika lewat `g_mediaRefreshEvent`; card expanded 400px; teks waktu dan ujung scrubber mengikuti panah dengan jarak sama di kedua sisi. **Garis fullscreen video bisa di-hover** untuk membuka card (setelah island menjadi garis), dan tidak lagi ikut auto-hide idle |
 | 1.7.3 | Teks notif clipboard 12px (`clipboardTextFormat_`, juga di pill inline lewat `InlineAlertContent::primaryFormat`); **island sembunyi langsung saat overlay screenshot** (`IsScreenSnipActive`, tanpa topmost/alert sampai selesai; tidak di-exclude dari capture); kotak tanggal tab Tanggal & Cuaca 112px; tombol volume di 100%/0% tetap memunculkan pill |
 | 1.7.2 | Chip cuaca kembali sederhana (glyph + angka), ikon cuaca 60px. **Fallback Open-Meteo** saat wttr.in gagal/timeout (`FetchOpenMeteo`, `GeocodeCityOpenMeteo`, `WmoToWwoCode`); wttr.in dilewati selama 1 jam setelah gagal. Log: `Weather: Requesting fallback from api.open-meteo.com`, `Weather parsed success (Open-Meteo)` |
 | 1.7.1 | Revisi tab Tanggal & Cuaca: sudut kartu konsentris dengan island (`InsetCardRadius`); ikon cuaca 52px dan suhu 63px; tile kompas angin / termometer terasa / ring kelembapan menggantikan chip polos |

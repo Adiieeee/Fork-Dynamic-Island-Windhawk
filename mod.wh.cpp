@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.7.3
+// @version         1.7.4
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -60,6 +60,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 - **File Tray:** Enable the File Tray module, then drag files onto the island. It jumps to the shelf to confirm the drop. Click a row to open that file; right-click the island to clear the shelf.
 - **Alerts while music plays:** Volume, clipboard, Caps Lock, notifications, battery, USB, Bluetooth and Do Not Disturb alerts appear inside the media pill, between the album art and the waveform (briefly replacing the lyric line), and the pill stretches to fit them. A running focus timer or progress task gets its own Activity tab at the end of the scroll loop instead.
 - **Minimize:** The button left of "previous" on the media card tucks the island away into a thin glass line with a faint live waveform. Hover the line to open the full island; click the button again to bring the normal pill back. Alerts such as volume or notifications still pop out while minimized.
+- **Switch player:** When more than one app is playing media (say Spotify and a YouTube tab), small arrows appear beside the elapsed and remaining times on the media card. Click them to choose which player the island shows and controls. The choice holds until that player closes.
 - **Right-Click Menu:** Right-click the island to access Theme presets, Transparency settings, and to pin the island open.
 - **⚠️ Right-click choices are per-session:** The right-click menu is a quick way to try things out, not a place to configure the mod. **Theme**, **shape style** (Pill / Notch / Windows 11) and **pin open** are all re-applied from your Windhawk settings whenever the mod restarts — so a reboot, a mod update, or toggling the mod off and on will discard them. Anything you want to keep, set in the **Mod Settings** tab instead. (Transparency and Expand-on-hover do persist, but the settings tab is still the reliable place for them.)
 - **Windhawk Settings:** Visit the Mod Settings tab to change the island's Position, Size Scale, Refresh Rate (Target FPS), Animation Style (Smooth/Default/Bouncy/Snappy), Animation Speed, and toggle specific modules. You can also perfectly align the island using the `Offset X` and `Offset Y` settings, and select exactly which monitor the island should appear on (including a "Follow Mouse" mode!).
@@ -170,7 +171,7 @@ We love community contributions! To ensure high-quality updates, please follow t
       - '60': Hide after 60 seconds
   - AutoHideFullscreen: true
     $name: Minimize on full screen video
-    $description: While a video plays in full screen (YouTube, Netflix, VLC and other players) the island shrinks to the thin minimized line at the top edge and does not open on hover. Games and other full-screen apps keep the normal island. Only volume changes and the mic/camera privacy dot still surface over a full-screen video. The Windhawk log names any full-screen window that was not recognised as video.
+    $description: While a video plays in full screen (YouTube, Netflix, VLC and other players) the island shrinks to the thin minimized line at the top edge; hover the line to open the full island. Games and other full-screen apps keep the normal island. Only volume changes and the mic/camera privacy dot still surface over a full-screen video. The Windhawk log names any full-screen window that was not recognised as video.
   - UnhideOnHover: true
     $name: Unhide on hover
     $description: Allow the hidden island to reappear when you hover your mouse over it.
@@ -567,20 +568,22 @@ constexpr UINT kClipboardImageThumbMaxDim = 160;  // longer-side cap for the cli
 // that same content space (see MediaContentFromClient), so both sides read the
 // constants below and cannot drift apart.
 namespace MediaLayout {
-    constexpr float kExpandedWidth = 380.0f;
+    // 400 rather than the original 380 so the player switch arrows on the
+    // scrubber row have room beside the times without crowding the card edge.
+    constexpr float kExpandedWidth = 400.0f;
     constexpr float kExpandedHeight = 184.0f;
 
     constexpr float kScrubberY = 114.0f;
     constexpr float kScrubMargin = 24.0f;
-    constexpr float kScrubBarLeftInset = 48.0f;
-    constexpr float kScrubBarRightInset = 48.0f;
+    constexpr float kScrubBarLeftInset = 56.0f;
+    constexpr float kScrubBarRightInset = 56.0f;
 
     constexpr float kScrubHitHalfHeight = 14.0f;
     constexpr float kScrubHitPadX = 6.0f;
 
     // Distance from the content rect's left/right edge to each end of the
     // scrubber bar. Used by the content-space hit test so the bar's clickable
-    // span follows the actual pill width instead of assuming 380px.
+    // span follows the actual pill width instead of assuming 400px.
     constexpr float kScrubInsetLeft = kScrubMargin + kScrubBarLeftInset;
     constexpr float kScrubInsetRight = kScrubMargin + kScrubBarRightInset;
 
@@ -598,7 +601,7 @@ namespace MediaLayout {
 
     // Lyrics on/off toggle, drawn to the right of "next" on the controls row.
     // Its hit box (+99..+137) clears next's (+42..+86) and stays well inside
-    // the 380px card, left of the pagination dots.
+    // the 400px card, left of the pagination dots.
     constexpr float kLyricsButtonOffsetX = 118.0f;
     constexpr float kLyricsButtonRadius = 13.0f;
 
@@ -606,6 +609,20 @@ namespace MediaLayout {
     // "previous": its hit box (-137..-99) clears prev's (-86..-42).
     constexpr float kMinimizeButtonOffsetX = -118.0f;
     constexpr float kMinimizeButtonRadius = 13.0f;
+
+    // Session switch arrows (commands 5 = previous player, 6 = next player),
+    // shown only when more than one SMTC session exists. They sit on the
+    // scrubber row at the card's edges. While they are shown the elapsed time
+    // is left-aligned and the remaining time right-aligned against
+    // kSessionTimeInsetX, so both times sit the same distance from their arrow
+    // whatever their width, and the bar then starts / ends timeGap past each
+    // time (see DrawMedia and g_scrubInsetLeft). The hit boxes (8..32 from each
+    // edge) stay clear of the scrubber's own, which begins after the times,
+    // of the controls row below and of the minimize button.
+    constexpr float kSessionArrowInsetX = 20.0f;
+    constexpr float kSessionArrowY = kScrubberY;
+    constexpr float kSessionArrowHitHalf = 12.0f;
+    constexpr float kSessionTimeInsetX = 32.0f;
 
     // The minimized island: a thin glass line. Its hover target is the line
     // itself, padded only slightly (and running up to the screen edge so the
@@ -1250,6 +1267,13 @@ struct SharedState {
     // AUMIDs of every SMTC session currently playing (not just the one the
     // pill follows), used to tell a full-screen video from a game.
     std::vector<std::wstring> playingMediaSources;
+    // AUMIDs of every SMTC session (deduplicated, in GetSessions order), the
+    // list the media card's session arrows cycle through.
+    std::vector<std::wstring> mediaSessionSources;
+    // Player chosen with those arrows. While its session exists the pill
+    // follows it instead of SelectActiveMediaSession's automatic choice;
+    // empty = automatic.
+    std::wstring pinnedMediaSource;
     ClipboardSnapshot clipboard;
     NotificationSnapshot notification;
     VolumeSnapshot volume;
@@ -1326,6 +1350,9 @@ std::atomic<uint64_t> g_artGenerationCounter = 0;
 HWND g_hwnd = nullptr;
 HANDLE g_stopEvent = nullptr;
 HANDLE g_settingsChangedEvent = nullptr;
+// Signalled when the user picks another player with the media card's session
+// arrows, so MediaThreadProc re-polls at once instead of after its 1.5s wait.
+HANDLE g_mediaRefreshEvent = nullptr;
 HANDLE g_renderThread = nullptr;
 HANDLE g_mediaThread = nullptr;
 HANDLE g_audioThread = nullptr;
@@ -1358,6 +1385,15 @@ std::atomic<bool> g_layoutDirty = true;
 std::atomic<bool> g_clickExpanded = false;
 std::atomic<int> g_pressedMediaButton = -1;
 std::atomic<int> g_hoveredMediaButton = -1;
+// Size of g_state.mediaSessionSources, mirrored lock-free for the hit test and
+// renderer: the session arrows only exist when there is more than one player.
+std::atomic<int> g_mediaSessionCount = 0;
+// Where DrawMedia actually put the scrubber bar ends, in content space (left
+// inset from the card's left edge, right inset from its right edge). Fixed
+// MediaLayout values normally; with the player switch arrows shown the bar
+// follows the measured time labels, so the scrub hit test reads these.
+std::atomic<float> g_scrubInsetLeft = MediaLayout::kScrubInsetLeft;
+std::atomic<float> g_scrubInsetRight = MediaLayout::kScrubInsetRight;
 std::atomic<int> g_hoveredFileTrayRow = -1;  // row index under the cursor on the File Tray card
 std::atomic<bool> g_scrubbing = false;           // true while press-dragging the media timeline scrubber
 std::atomic<float> g_scrubDragFraction = 0.0f;   // live 0..1 drag position while g_scrubbing is true
@@ -1685,10 +1721,20 @@ MediaContentPoint MediaContentFromClient(int clientX, int clientY) {
 }
 
 // Returns 0 = previous, 1 = play/pause, 2 = next, 3 = lyrics toggle,
-// 4 = minimize toggle, or -1 for no button.
+// 4 = minimize toggle, 5 / 6 = previous / next player, or -1 for no button.
 int MediaTransportHitTest(const MediaContentPoint& pt) {
     if (!pt.valid || pt.height <= MediaLayout::kExpandedMinHeight) {
         return -1;
+    }
+
+    if (g_mediaSessionCount.load(std::memory_order_relaxed) > 1 &&
+        std::fabs(pt.y - MediaLayout::kSessionArrowY) <= MediaLayout::kSessionArrowHitHalf) {
+        if (std::fabs(pt.x - MediaLayout::kSessionArrowInsetX) <= MediaLayout::kSessionArrowHitHalf) {
+            return 5;
+        }
+        if (std::fabs(pt.x - (pt.width - MediaLayout::kSessionArrowInsetX)) <= MediaLayout::kSessionArrowHitHalf) {
+            return 6;
+        }
     }
 
     const float centerX = pt.width * 0.5f;
@@ -1723,8 +1769,8 @@ float MediaScrubFractionFromContent(const MediaContentPoint& pt) {
         return -1.0f;
     }
 
-    const float barLeft = MediaLayout::kScrubInsetLeft;
-    const float barRight = pt.width - MediaLayout::kScrubInsetRight;
+    const float barLeft = g_scrubInsetLeft.load(std::memory_order_relaxed);
+    const float barRight = pt.width - g_scrubInsetRight.load(std::memory_order_relaxed);
     if (barRight - barLeft <= 1.0f) {
         return -1.0f;
     }
@@ -1744,8 +1790,8 @@ float MediaScrubFractionUnbounded(const MediaContentPoint& pt) {
     if (!pt.valid) {
         return -1.0f;
     }
-    const float barLeft = MediaLayout::kScrubInsetLeft;
-    const float barRight = pt.width - MediaLayout::kScrubInsetRight;
+    const float barLeft = g_scrubInsetLeft.load(std::memory_order_relaxed);
+    const float barRight = pt.width - g_scrubInsetRight.load(std::memory_order_relaxed);
     if (barRight - barLeft <= 1.0f) {
         return -1.0f;
     }
@@ -4090,8 +4136,13 @@ void TriggerNudge() {
 // while Spotify worked. Prefer the current session when it is actually playing,
 // otherwise the first session that is, and only then fall back to the current
 // one so paused/idle state still shows.
+//
+// A player the user picked with the media card's session arrows (pinnedSource)
+// wins over all of that for as long as it has a session; *pinnedFound reports
+// whether it still does, so the caller can drop a pin whose player has gone.
 winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession SelectActiveMediaSession(
-    winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager const& manager) {
+    winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager const& manager,
+    std::wstring const& pinnedSource, bool* pinnedFound) {
     using PlaybackStatus =
         winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus;
 
@@ -4105,6 +4156,32 @@ winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession Select
             return false;
         }
     };
+
+    *pinnedFound = false;
+    if (!pinnedSource.empty()) {
+        // A browser can own several sessions under one AUMID; prefer the one
+        // that is playing.
+        winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession firstMatch = nullptr;
+        try {
+            for (auto const& candidate : manager.GetSessions()) {
+                if (candidate.SourceAppUserModelId().c_str() != pinnedSource) {
+                    continue;
+                }
+                if (sessionIsPlaying(candidate)) {
+                    *pinnedFound = true;
+                    return candidate;
+                }
+                if (!firstMatch) {
+                    firstMatch = candidate;
+                }
+            }
+        } catch (...) {
+        }
+        if (firstMatch) {
+            *pinnedFound = true;
+            return firstMatch;
+        }
+    }
 
     winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession current = nullptr;
     try {
@@ -4146,7 +4223,20 @@ DWORD WINAPI MediaThreadProc(void*) {
             }
 
             if (manager) {
-                auto session = SelectActiveMediaSession(manager);
+                std::wstring pinnedSource;
+                {
+                    std::lock_guard lock(g_stateMutex);
+                    pinnedSource = g_state.pinnedMediaSource;
+                }
+                bool pinnedFound = false;
+                auto session = SelectActiveMediaSession(manager, pinnedSource, &pinnedFound);
+                if (!pinnedSource.empty() && !pinnedFound) {
+                    // The chosen player closed; go back to automatic selection.
+                    std::lock_guard lock(g_stateMutex);
+                    if (g_state.pinnedMediaSource == pinnedSource) {
+                        g_state.pinnedMediaSource.clear();
+                    }
+                }
                 if (session) {
                     auto properties = session.TryGetMediaPropertiesAsync().get();
                     auto playback = session.GetPlaybackInfo();
@@ -4365,12 +4455,18 @@ DWORD WINAPI MediaThreadProc(void*) {
         // Every playing session, not only the followed one, so a full-screen
         // YouTube tab still counts as video while Spotify drives the pill.
         std::vector<std::wstring> playingSources;
+        std::vector<std::wstring> allSources;
         if (manager) {
             try {
                 for (auto const& candidate : manager.GetSessions()) {
                     try {
+                        std::wstring source = candidate.SourceAppUserModelId().c_str();
                         if (candidate.GetPlaybackInfo().PlaybackStatus() == PlaybackStatus::Playing) {
-                            playingSources.emplace_back(candidate.SourceAppUserModelId().c_str());
+                            playingSources.push_back(source);
+                        }
+                        if (!source.empty() &&
+                            std::find(allSources.begin(), allSources.end(), source) == allSources.end()) {
+                            allSources.push_back(std::move(source));
                         }
                     } catch (...) {
                     }
@@ -4378,12 +4474,18 @@ DWORD WINAPI MediaThreadProc(void*) {
             } catch (...) {
             }
         }
+        const int sessionCount = static_cast<int>(allSources.size());
         {
             std::lock_guard lock(g_stateMutex);
             g_state.playingMediaSources = std::move(playingSources);
+            g_state.mediaSessionSources = std::move(allSources);
+        }
+        if (g_mediaSessionCount.exchange(sessionCount) != sessionCount) {
+            g_layoutDirty = true;
         }
 
-        WaitForSingleObject(g_stopEvent, 1500);
+        const HANDLE waitHandles[] = {g_stopEvent, g_mediaRefreshEvent};
+        WaitForMultipleObjects(g_mediaRefreshEvent ? 2 : 1, waitHandles, FALSE, 1500);
     }
 
     winrt::uninit_apartment();
@@ -7601,6 +7703,26 @@ winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession Resolv
         }
     }
     return manager.GetCurrentSession();
+}
+
+// Session arrows on the media card: makes the previous (direction < 0) or next
+// player the one the island follows, then wakes MediaThreadProc to pick it up.
+void SwitchMediaSession(int direction) {
+    {
+        std::lock_guard lock(g_stateMutex);
+        const auto& sources = g_state.mediaSessionSources;
+        const int count = static_cast<int>(sources.size());
+        if (count < 2) {
+            return;
+        }
+        const auto it = std::find(sources.begin(), sources.end(), g_state.media.sourceAppUserModelId);
+        const int current = (it == sources.end()) ? 0 : static_cast<int>(it - sources.begin());
+        const int next = (current + (direction < 0 ? count - 1 : 1)) % count;
+        g_state.pinnedMediaSource = sources[next];
+    }
+    if (g_mediaRefreshEvent) {
+        SetEvent(g_mediaRefreshEvent);
+    }
 }
 
 // Sends a transport command: 0 = previous, 1 = play/pause, 2 = next.
@@ -11004,20 +11126,37 @@ class Renderer {
                 const float scrubLeft = rect.left + MediaLayout::kScrubMargin;
                 const float scrubRight = rect.right - MediaLayout::kScrubMargin;
 
-                const float barLeft = scrubLeft + MediaLayout::kScrubBarLeftInset;
-                const float barRight = scrubRight - MediaLayout::kScrubBarRightInset;
+                float barLeft = scrubLeft + MediaLayout::kScrubBarLeftInset;
+                float barRight = scrubRight - MediaLayout::kScrubBarRightInset;
                 const float timeGap = 8.0f;
 
-                D2D1_RECT_F elRect = D2D1::RectF(scrubLeft, scrubberY - 10.0f, barLeft - timeGap, scrubberY + 10.0f);
-                D2D1_RECT_F remRect = D2D1::RectF(barRight + timeGap, scrubberY - 10.0f, scrubRight, scrubberY + 10.0f);
+                // With the player switch arrows shown, the times hug the arrows
+                // (outer alignment) so each arrow-to-time gap is the same, and
+                // the bar ends follow the measured times so each time-to-bar
+                // gap is timeGap on both sides too (the remaining time is
+                // usually wider: it carries a minus sign). The bar ends are
+                // published for the scrub hit test.
+                const bool sessionArrows = g_mediaSessionCount.load(std::memory_order_relaxed) > 1;
+                const float timeLeft = sessionArrows ? rect.left + MediaLayout::kSessionTimeInsetX : scrubLeft;
+                const float timeRight = sessionArrows ? rect.right - MediaLayout::kSessionTimeInsetX : scrubRight;
+                if (sessionArrows && smallTextFormat_) {
+                    barLeft = timeLeft + MeasureTextWidth(elapsedStr, smallTextFormat_.Get()) + timeGap;
+                    barRight = timeRight - MeasureTextWidth(remainStr, smallTextFormat_.Get()) - timeGap;
+                }
+                g_scrubInsetLeft.store(barLeft - rect.left, std::memory_order_relaxed);
+                g_scrubInsetRight.store(rect.right - barRight, std::memory_order_relaxed);
+                D2D1_RECT_F elRect = D2D1::RectF(timeLeft, scrubberY - 10.0f, barLeft - timeGap, scrubberY + 10.0f);
+                D2D1_RECT_F remRect = D2D1::RectF(barRight + timeGap, scrubberY - 10.0f, timeRight, scrubberY + 10.0f);
 
                 mutedBrush_->SetOpacity(0.8f);
                 if (smallTextFormat_) {
                     smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                    smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+                    smallTextFormat_->SetTextAlignment(sessionArrows ? DWRITE_TEXT_ALIGNMENT_LEADING
+                                                                     : DWRITE_TEXT_ALIGNMENT_TRAILING);
                     target_->DrawTextW(elapsedStr.c_str(), static_cast<UINT32>(elapsedStr.size()), smallTextFormat_.Get(), elRect, mutedBrush_.Get());
 
-                    smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                    smallTextFormat_->SetTextAlignment(sessionArrows ? DWRITE_TEXT_ALIGNMENT_TRAILING
+                                                                     : DWRITE_TEXT_ALIGNMENT_LEADING);
                     target_->DrawTextW(remainStr.c_str(), static_cast<UINT32>(remainStr.size()), smallTextFormat_.Get(), remRect, mutedBrush_.Get());
 
                     smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
@@ -11072,6 +11211,14 @@ class Renderer {
                                   D2D1::Point2F(cx, cy),
                                   D2D1::Point2F(cx + MediaLayout::kControlSpacing, cy),
                                   now);
+
+                // Player switch arrows, only when there is another player to
+                // switch to. Same MediaLayout constants as the hit test.
+                if (g_mediaSessionCount.load(std::memory_order_relaxed) > 1) {
+                    const float arrowY = rect.top + MediaLayout::kSessionArrowY;
+                    DrawSessionArrow(D2D1::Point2F(rect.left + MediaLayout::kSessionArrowInsetX, arrowY), false);
+                    DrawSessionArrow(D2D1::Point2F(rect.right - MediaLayout::kSessionArrowInsetX, arrowY), true);
+                }
             } else if (activeTabId == 1) {
                 SYSTEMTIME local = {}; GetLocalTime(&local);
                 if (settings.weather) {
@@ -11634,7 +11781,7 @@ class Renderer {
         const int pressedCmd = g_pressedMediaButton.load();
         bool isStillAnimating = false;
 
-        for (int i = 0; i < 5; ++i) {
+        for (int i = 0; i < 7; ++i) {
             const float target = (pressedCmd == i) ? 1.0f : 0.0f;
             const float tau = (target > mediaBtnPress_[i]) ? 0.025f : 0.075f;
             const float k = 1.0f - std::exp(-dt / tau);
@@ -11661,6 +11808,38 @@ class Renderer {
                                MediaLayout::kLyricsButtonRadius);
         DrawMinimizeToggleButton(D2D1::Point2F(play.x + MediaLayout::kMinimizeButtonOffsetX, play.y),
                                  MediaLayout::kMinimizeButtonRadius);
+    }
+
+    // Previous / next player (commands 5 / 6): a small chevron that gets a round
+    // backdrop on hover, kept quiet otherwise so it does not compete with the art.
+    void DrawSessionArrow(D2D1_POINT_2F center, bool pointsRight) {
+        const int cmd = pointsRight ? 6 : 5;
+        const bool isHovered = (g_hoveredMediaButton.load() == cmd);
+        const float press = mediaBtnPress_[cmd];
+        const float s = 1.0f - 0.13f * press;
+
+        if (isHovered || press > 0.0f) {
+            ComPtr<ID2D1SolidColorBrush> bg;
+            target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.09f + 0.08f * press), &bg);
+            if (bg) {
+                const float r = 10.0f * s;
+                target_->FillEllipse(D2D1::Ellipse(center, r, r), bg.Get());
+            }
+        }
+
+        ComPtr<ID2D1SolidColorBrush> icon;
+        target_->CreateSolidColorBrush(
+            WithAlpha(material_.textPrimary, Clamp((isHovered ? 0.92f : 0.45f) + 0.08f * press, 0.0f, 1.0f)), &icon);
+        if (!icon) {
+            return;
+        }
+        const float dir = pointsRight ? 1.0f : -1.0f;
+        const float tipX = center.x + 2.5f * s * dir;
+        const float baseX = center.x - 2.5f * s * dir;
+        const float halfH = 5.0f * s;
+        const float stroke = 1.8f * s;
+        target_->DrawLine(D2D1::Point2F(baseX, center.y - halfH), D2D1::Point2F(tipX, center.y), icon.Get(), stroke);
+        target_->DrawLine(D2D1::Point2F(baseX, center.y + halfH), D2D1::Point2F(tipX, center.y), icon.Get(), stroke);
     }
 
     // Minimize on/off (command 4): a bar along the top with a chevron pointing
@@ -13127,7 +13306,7 @@ class Renderer {
     // so track changes don't produce a jarring instant color pop.
     D2D1_COLOR_F currentAccent_ = D2D1::ColorF(0x4cc9f0);
     double       lastAccentTime_ = -1.0;  // -1 = not yet set (will snap on first frame)
-    float        mediaBtnPress_[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};  // prev, play, next, lyrics, minimize
+    float        mediaBtnPress_[7] = {};  // prev, play, next, lyrics, minimize, prev player, next player
     bool         minimizedLine_ = false;  // set per frame by the render loop
     bool         lineMode_ = false;       // set per frame by the render loop
     IslandKind   inlineAlert_ = IslandKind::Idle;  // set per frame by the render loop
@@ -13969,11 +14148,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     !kinds.empty() && kinds[0] == IslandKind::Idle &&
                     (g_settings.gameOverlay || Wh_GetIntValue(L"GameOverlayPinned", 0) != 0);
 
-                // A minimized island is already open whenever it can be clicked
-                // (hovering opens it), so the first click must not be eaten as
-                // "click to expand".
+                // A minimized island (or the line over a full-screen video) is
+                // already open whenever it can be clicked (hovering opens it),
+                // so the first click must not be eaten as "click to expand".
                 bool expanded = Wh_GetIntValue(L"PinnedExpanded", 0) != 0 || g_clickExpanded.load() ||
-                                g_islandMinimized.load();
+                                g_islandMinimized.load() ||
+                                (g_isFullscreen.load() && !g_fullscreenOverrideVisible.load());
                 if (!gameMetricsPresent && !g_settings.expandOnHover && !expanded) {
                     g_clickExpanded = true;
                     g_layoutDirty = true;
@@ -14031,6 +14211,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         const bool minimize = !g_islandMinimized.load();
                         g_islandMinimized = minimize;
                         Wh_SetIntValue(L"IslandMinimized", minimize ? 1 : 0);
+                        g_layoutDirty = true;
+                        return 0;
+                    }
+                    if (cmd == 5 || cmd == 6) {
+                        SwitchMediaSession(cmd == 5 ? -1 : 1);
                         g_layoutDirty = true;
                         return 0;
                     }
@@ -14531,9 +14716,10 @@ DWORD WINAPI RenderThreadProc(void*) {
             lastFullscreenCheck = now;
         }
         // Over a full-screen video the island shrinks to the minimized line at
-        // the screen edge and stays there: hover and pin cannot open it and no
-        // alerts surface -- except a volume change (the Windows OSD is
-        // suppressed, so this is the only feedback) and the privacy dot.
+        // the screen edge. Hovering the line opens the card, as in minimized
+        // mode, but pin does not and no alerts surface -- except a volume
+        // change (the Windows OSD is suppressed, so this is the only feedback)
+        // and the privacy dot.
         const bool videoSuppressed =
             isFullscreen && !g_fullscreenOverrideVisible.load(std::memory_order_relaxed);
         const bool volumeAlertActive =
@@ -14581,7 +14767,8 @@ DWORD WINAPI RenderThreadProc(void*) {
             // (still) that small the hover target is padded out around it and
             // runs up to the window top. Once it has opened, the card itself is
             // the target again, so leaving the card closes it back down.
-            const bool lineResting = g_islandMinimized.load(std::memory_order_relaxed) && heightSpring.value < 30.0f;
+            const bool lineResting = (g_islandMinimized.load(std::memory_order_relaxed) || videoSuppressed) &&
+                                     heightSpring.value < 30.0f;
             if (lineResting) {
                 const int padX = static_cast<int>(std::round(MediaLayout::kMinimizedHoverPadX * g_settings.sizeScale));
                 const int padBelow = static_cast<int>(std::round(MediaLayout::kMinimizedHoverPadBelow * g_settings.sizeScale));
@@ -14595,11 +14782,6 @@ DWORD WINAPI RenderThreadProc(void*) {
             RECT dockRect = GetIslandDockRect();
             hover = PtInRect(&dockRect, cursor) != FALSE;
         }
-        if (videoSuppressed) {
-            // Nothing the cursor does may bring the island back over a video.
-            hover = false;
-        }
-
         bool needsRender = false;
 
         if (!hover && g_clickExpanded.load()) {
@@ -14662,11 +14844,23 @@ DWORD WINAPI RenderThreadProc(void*) {
         // opens the full card, whatever Expand-on-hover is set to. The in-game
         // metrics strip keeps its own behaviour.
         const bool minimizedMode = g_islandMinimized.load(std::memory_order_relaxed) && !gameMetricsPresent;
-        if (minimizedMode) {
+        if (minimizedMode || videoSuppressed) {
             isHoverExpanded = hover;
         }
+        // Over a full-screen video only hovering the line opens the card;
+        // pin and a track change keep it on the line. Hover counts only once
+        // the island has shrunk to the line after the video went full screen:
+        // otherwise a cursor that happened to be over the island (or over the
+        // card the moment it opened) kept it big and it never minimized.
+        static bool videoLineArmed = false;
+        if (!videoSuppressed) {
+            videoLineArmed = false;
+        } else if (heightSpring.value < 30.0f) {
+            videoLineArmed = true;
+        }
+        const bool videoHoverOpen = videoSuppressed && videoLineArmed && isHoverExpanded;
 
-        if (currentlyHidden && !g_settings.unhideOnHover && !minimizedMode) {
+        if (currentlyHidden && !g_settings.unhideOnHover && !minimizedMode && !videoSuppressed) {
             isHoverExpanded = false;
         } else if (isHoverExpanded || hoverUnhides || pinned || isTransientAlert || unhideGraceActive) {
             lastInteractionTime = now;
@@ -14686,7 +14880,7 @@ DWORD WINAPI RenderThreadProc(void*) {
         }
         // The line is the minimized island's resting state, so idle auto-hide
         // never takes it away (fullscreen suppression still does, below).
-        if (minimizedMode) {
+        if (minimizedMode || videoSuppressed) {
             isHidden = false;
         }
 
@@ -14717,7 +14911,8 @@ DWORD WINAPI RenderThreadProc(void*) {
         const int metricTabIdx = NormalizedTabIndex(g_settings);
         const bool onHardwareMonitorTab = (metricTabIdx == HardwareMonitorTabIndex(g_settings));
         const bool hwMonitorVisible = (primary.kind == IslandKind::Idle || primary.kind == IslandKind::Media) &&
-            !isFullscreen && !gameMetricsPresent && (pinned || isHoverExpanded) && onHardwareMonitorTab;
+            ((!isFullscreen && (pinned || isHoverExpanded)) || videoHoverOpen) &&
+            !gameMetricsPresent && onHardwareMonitorTab;
         const bool gameOverlayVisible = gameMetricsPresent && !isFullscreen;
         const bool systemMetricsVisible = hwMonitorVisible || gameOverlayVisible;
 
@@ -14730,7 +14925,7 @@ DWORD WINAPI RenderThreadProc(void*) {
         }
 
         if (primary.kind == IslandKind::Idle) {
-            if (!isFullscreen && (pinned || isHoverExpanded)) {
+            if ((!isFullscreen && (pinned || isHoverExpanded)) || videoHoverOpen) {
                 primary.width = MediaLayout::kExpandedWidth * g_settings.sizeScale;
                 primary.height = MediaLayout::kExpandedHeight * g_settings.sizeScale;
             } else if (primary.width > 0.0f) {
@@ -14762,7 +14957,7 @@ DWORD WINAPI RenderThreadProc(void*) {
             primary.height = GameOverlayLayout::For(compact).height * g_settings.sizeScale;
         }
         if (primary.kind == IslandKind::Media) {
-            if (!isFullscreen && (isHoverExpanded || pinned || recentTrackChange)) {
+            if ((!isFullscreen && (isHoverExpanded || pinned || recentTrackChange)) || videoHoverOpen) {
                 primary.width = MediaLayout::kExpandedWidth * g_settings.sizeScale;
                 primary.height = MediaLayout::kExpandedHeight * g_settings.sizeScale;
             } else if (hasInlineAlert) {
@@ -14776,7 +14971,7 @@ DWORD WINAPI RenderThreadProc(void*) {
         // Minimized and nothing asking for attention: rest as the thin line.
         // Transient alerts still surface at their normal size, then the island
         // springs back down to the line once they expire.
-        const bool videoLine = videoSuppressed && !isTransientAlert && !privacyActive;
+        const bool videoLine = videoSuppressed && !isTransientAlert && !privacyActive && !videoHoverOpen;
         const bool minimizedLine =
             videoLine || (minimizedMode && !isHoverExpanded && !pinned && !isTransientAlert);
         if (minimizedLine) {
@@ -15241,6 +15436,7 @@ DWORD WINAPI RenderThreadProc(void*) {
 bool StartThreads() {
     g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_settingsChangedEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    g_mediaRefreshEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!g_stopEvent || !g_settingsChangedEvent) {
         return false;
     }
@@ -15309,6 +15505,10 @@ void StopThreads() {
     if (g_settingsChangedEvent) {
         CloseHandle(g_settingsChangedEvent);
         g_settingsChangedEvent = nullptr;
+    }
+    if (g_mediaRefreshEvent) {
+        CloseHandle(g_mediaRefreshEvent);
+        g_mediaRefreshEvent = nullptr;
     }
 
     g_running = false;
