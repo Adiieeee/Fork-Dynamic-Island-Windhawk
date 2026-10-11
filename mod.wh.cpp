@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.7.4
+// @version         1.7.5
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -30,7 +30,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 | :--- | :--- | :--- |
 | **Media Player** | Shows live album art, track details, audio waveforms, and full playback controls. Synced lyrics (from [LRCLIB](https://lrclib.net)) scroll along in the collapsed pill; toggle them with the lyrics button next to the playback controls. | ![Media](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/media-v2.png) |
 | **Calendar** | A monthly grid that always fits its rows, with today marked in the accent colour. | ![Calendar](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/calendar.png) |
-| **Weather** | Real-time weather stats powered by wttr.in, including wind speed, humidity, and "feels like" temperature. | ![Weather](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/weather-v2.png) |
+| **Weather** | Real-time weather stats powered by wttr.in, including wind speed, humidity, and "feels like" temperature. Hover a chip for a short explanation of what it means. | ![Weather](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/weather-v2.png) |
 | **Hardware Monitor** | CPU, RAM, GPU, disk and live network throughput, with load bars that turn amber past 75% and red past 90%. | ![Hardware Monitor](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/hardware-monitor.png) |
 | **Game Overlay** | Real-time FPS, CPU, GPU, RAM and disk, sized to whichever metrics you enable. | ![Gamebar](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/gamebar-v2.png) |
 | **Idle View** | A minimal dashboard with your battery status, digital clock, and sleek pagination dots. | ![Idle](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/idle-v2.png) |
@@ -679,6 +679,33 @@ namespace FileTrayLayout {
         const float span = contentHeight - kListBottomInset - kListTop + kRowGap;
         const int capacity = static_cast<int>(span / (kRowHeight + kRowGap));
         return capacity < 1 ? 1 : capacity;
+    }
+}
+
+// Layout for the Date & Weather card's right column. Shared by
+// DrawDateWeatherDashboard and the chip hover test in OverlayWndProc, which
+// shows a short explanation of the hovered chip (wind, feels like, humidity).
+namespace WeatherLayout {
+    constexpr float kColLeft = 160.0f;
+    constexpr float kColRightInset = 24.0f;  // leaves room for the pagination dots
+    constexpr float kBandTop = 16.0f;
+    constexpr float kBandBottomInset = 20.0f;
+    constexpr float kChipHeight = 28.0f;
+    constexpr float kChipGap = 6.0f;
+    // Wind is wider because its value carries a unit.
+    constexpr float kChipWeights[3] = {1.3f, 1.0f, 1.0f};
+    constexpr float kChipWeightSum = 3.3f;
+
+    // Horizontal extent of chip `index` for a card `width` wide, in content
+    // space relative to the card's left edge.
+    inline void ChipSpan(int index, float width, float& left, float& right) {
+        const float colRight = width - kColRightInset;
+        const float span = (colRight - kColLeft) - kChipGap * 2.0f;
+        left = kColLeft;
+        for (int i = 0; i < index; ++i) {
+            left += span * kChipWeights[i] / kChipWeightSum + kChipGap;
+        }
+        right = left + span * kChipWeights[index] / kChipWeightSum;
     }
 }
 
@@ -1395,6 +1422,7 @@ std::atomic<int> g_mediaSessionCount = 0;
 std::atomic<float> g_scrubInsetLeft = MediaLayout::kScrubInsetLeft;
 std::atomic<float> g_scrubInsetRight = MediaLayout::kScrubInsetRight;
 std::atomic<int> g_hoveredFileTrayRow = -1;  // row index under the cursor on the File Tray card
+std::atomic<int> g_hoveredWeatherChip = -1;  // 0 wind, 1 feels like, 2 humidity on the Date & Weather card
 std::atomic<bool> g_scrubbing = false;           // true while press-dragging the media timeline scrubber
 std::atomic<float> g_scrubDragFraction = 0.0f;   // live 0..1 drag position while g_scrubbing is true
 std::atomic<double> g_lastLiveSeekTime = 0.0;    // throttle gate for live seeks while dragging
@@ -1637,6 +1665,10 @@ const wchar_t* Loc(const wchar_t* english) {
         {L"Wind", {nullptr, L"Vent", L"Viento", L"Wind", L"Vento", L"Vento", L"Ветер", L"Rüzgar", L"हवा", L"风速", L"風", L"바람"}},
         {L"Feels Like", {nullptr, L"Ressenti", L"Sensación", L"Gefühlt", L"Sensação", L"Percepita", L"Ощущается", L"Hissedilen", L"महसूस", L"体感", L"体感", L"체감"}},
         {L"Humidity", {nullptr, L"Humidité", L"Humedad", L"Luftfeuchte", L"Umidade", L"Umidità", L"Влажность", L"Nem", L"नमी", L"湿度", L"湿度", L"습도"}},
+        // Hover explanations for the Date & Weather chips.
+        {L"Current wind speed", {nullptr, L"Vitesse actuelle du vent", L"Velocidad actual del viento", L"Aktuelle Windgeschwindigkeit", L"Velocidade atual do vento", L"Velocità attuale del vento", L"Текущая скорость ветра", L"Şu anki rüzgâr hızı", L"अभी हवा की गति", L"当前风速", L"現在の風速", L"현재 풍속"}},
+        {L"How warm or cold it actually feels", {nullptr, L"Température réellement ressentie", L"Cuánto calor o frío se siente realmente", L"Wie warm oder kalt es sich wirklich anfühlt", L"Quão quente ou frio realmente parece", L"Quanto caldo o freddo si percepisce davvero", L"Насколько тепло или холодно ощущается на самом деле", L"Gerçekte ne kadar sıcak ya da soğuk hissedildiği", L"असल में कितनी गर्मी या ठंड महसूस होती है", L"实际感受到的冷暖程度", L"実際に感じる暑さ・寒さ", L"실제로 느껴지는 따뜻함이나 추위"}},
+        {L"Amount of moisture in the air", {nullptr, L"Quantité d'humidité dans l'air", L"Cantidad de humedad en el aire", L"Feuchtigkeit in der Luft", L"Quantidade de umidade no ar", L"Quantità di umidità nell'aria", L"Количество влаги в воздухе", L"Havadaki nem miktarı", L"हवा में नमी की मात्रा", L"空气中的水汽含量", L"空気中の水分量", L"공기 중 수분의 양"}},
         {L"Drag files here", {nullptr, L"Déposez des fichiers ici", L"Arrastra archivos aquí", L"Dateien hierher ziehen", L"Arraste arquivos aqui", L"Trascina i file qui", L"Перетащите файлы сюда", L"Dosyaları buraya sürükleyin", L"फ़ाइलें यहाँ खींचें", L"将文件拖到此处", L"ここにファイルをドラッグ", L"여기에 파일을 끌어다 놓으세요"}},
         {L"No devices", {nullptr, L"Aucun appareil", L"Sin dispositivos", L"Keine Geräte", L"Nenhum dispositivo", L"Nessun dispositivo", L"Нет устройств", L"Cihaz yok", L"कोई डिवाइस नहीं", L"无设备", L"デバイスなし", L"장치 없음"}},
         {L"item", {nullptr, L"élément", L"elemento", L"Element", L"item", L"elemento", L"элемент", L"öğe", L"आइटम", L"项", L"項目", L"항목"}},
@@ -1826,6 +1858,26 @@ int FileTrayRowAtContentPoint(const MediaContentPoint& pt, int itemCount) {
         return -1;
     }
     return index;
+}
+
+// Index of the Date & Weather chip under a content-space point (0 wind,
+// 1 feels like, 2 humidity), or -1.
+int WeatherChipAtContentPoint(const MediaContentPoint& pt) {
+    if (!pt.valid || pt.height <= MediaLayout::kExpandedMinHeight) {
+        return -1;
+    }
+    const float chipBottom = pt.height - WeatherLayout::kBandBottomInset;
+    if (pt.y < chipBottom - WeatherLayout::kChipHeight || pt.y > chipBottom) {
+        return -1;
+    }
+    for (int i = 0; i < 3; ++i) {
+        float left = 0.0f, right = 0.0f;
+        WeatherLayout::ChipSpan(i, pt.width, left, right);
+        if (pt.x >= left && pt.x <= right) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 // True when the point is over the expanded layout's album art.
@@ -9980,11 +10032,11 @@ class Renderer {
         // Same vertical band as the hero card (top + 16 .. bottom - 20), so the
         // two halves share a top and bottom edge. The right inset leaves room
         // for the pagination dots.
-        const float bandTop = rect.top + 16.0f * scale;
-        const float bandBottom = rect.bottom - 20.0f * scale;
+        const float bandTop = rect.top + WeatherLayout::kBandTop * scale;
+        const float bandBottom = rect.bottom - WeatherLayout::kBandBottomInset * scale;
         const float dividerX = rect.left + 146.0f * scale;
-        const float colLeft = rect.left + 160.0f * scale;
-        const float colRight = rect.right - 24.0f * scale;
+        const float colLeft = rect.left + WeatherLayout::kColLeft * scale;
+        const float colRight = rect.right - WeatherLayout::kColRightInset * scale;
 
         ComPtr<ID2D1SolidColorBrush> divider;
         target_->CreateSolidColorBrush(WithAlpha(material_.hairline, material_.hairline.a * settingsOpacity_), &divider);
@@ -10099,13 +10151,13 @@ class Renderer {
 
         // ── Chips: wind, feels like, humidity ────────────────────────────────
         // A plain pill per value: metric glyph + number, no labels (nothing to
-        // fit or translate). Wind is wider because its value carries a unit.
-        const float chipGap = 6.0f * scale;
-        const float chipH = 28.0f * scale;
+        // fit or translate); hovering one shows what it means (see below).
+        // Geometry comes from WeatherLayout, shared with the hover hit test.
+        const float chipH = WeatherLayout::kChipHeight * scale;
         const float chipTop = bandBottom - chipH;
         const float chipRadius = std::min(InsetCardRadius(rect, scale) * 0.5f, chipH * 0.5f);
-        const float weights[3] = {1.3f, 1.0f, 1.0f};
-        const float chipSpan = (colRight - colLeft) - chipGap * 2.0f;
+        const float cardWidth = (rect.right - rect.left) / scale;
+        const int hoveredChip = g_hoveredWeatherChip.load(std::memory_order_relaxed);
 
         const std::wstring windUnit = settings.weatherFahrenheit ? L" mph" : L" km/h";
         const std::wstring values[3] = {
@@ -10115,11 +10167,14 @@ class Renderer {
         };
 
         IDWriteTextFormat* chipFmt = boldTextFormat_ ? boldTextFormat_.Get() : smallTextFormat_.Get();
-        float chipX = colLeft;
+        D2D1_RECT_F hoveredChipRect = {};
         for (int i = 0; i < 3; ++i) {
-            const float chipW = chipSpan * weights[i] / 3.3f;
-            const D2D1_RECT_F chip = D2D1::RectF(chipX, chipTop, chipX + chipW, chipTop + chipH);
-            DrawCard(chip, chipRadius);
+            float spanLeft = 0.0f, spanRight = 0.0f;
+            WeatherLayout::ChipSpan(i, cardWidth, spanLeft, spanRight);
+            const D2D1_RECT_F chip = D2D1::RectF(rect.left + spanLeft * scale, chipTop,
+                                                 rect.left + spanRight * scale, chipTop + chipH);
+            DrawCard(chip, chipRadius, i == hoveredChip);
+            if (i == hoveredChip) hoveredChipRect = chip;
             if (iconStrong) {
                 DrawMetricGlyph(D2D1::Point2F(chip.left + 13.0f * scale, (chip.top + chip.bottom) * 0.5f),
                                 12.0f * scale, i, iconStrong.Get());
@@ -10137,7 +10192,82 @@ class Renderer {
                 chipFmt->SetTextAlignment(prevAlign);
                 chipFmt->SetParagraphAlignment(prevPara);
             }
-            chipX += chipW + chipGap;
+        }
+
+        // ── Hover explanation ────────────────────────────────────────────────
+        // A small card floating just above the chips, as wide as the column:
+        // the chip's name in bold, then one line on what the number means. It
+        // sits over the description, so it is filled near-opaque.
+        if (hoveredChip >= 0 && hoveredChip < 3 && dwriteFactory_ && smallTextFormat_) {
+            static const wchar_t* const kTitles[3] = {L"Wind", L"Feels Like", L"Humidity"};
+            static const wchar_t* const kBodies[3] = {
+                L"Current wind speed",
+                L"How warm or cold it actually feels",
+                L"Amount of moisture in the air",
+            };
+            const std::wstring title = Loc(kTitles[hoveredChip]);
+            const std::wstring tip = title + L"\n" + Loc(kBodies[hoveredChip]);
+
+            const float padX = 10.0f * scale;
+            const float padY = 7.0f * scale;
+            const float tipLeft = colLeft;
+            const float tipRight = colRight;
+            const float tipBottom = chipTop - 6.0f * scale;
+
+            const DWRITE_TEXT_ALIGNMENT prevAlign = smallTextFormat_->GetTextAlignment();
+            const DWRITE_PARAGRAPH_ALIGNMENT prevPara = smallTextFormat_->GetParagraphAlignment();
+            const DWRITE_WORD_WRAPPING prevWrap = smallTextFormat_->GetWordWrapping();
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            smallTextFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+
+            ComPtr<IDWriteTextLayout> tipLayout;
+            dwriteFactory_->CreateTextLayout(tip.c_str(), static_cast<UINT32>(tip.length()),
+                                             smallTextFormat_.Get(),
+                                             std::max(1.0f, tipRight - tipLeft - padX * 2.0f),
+                                             1000.0f, &tipLayout);
+            smallTextFormat_->SetTextAlignment(prevAlign);
+            smallTextFormat_->SetParagraphAlignment(prevPara);
+            smallTextFormat_->SetWordWrapping(prevWrap);
+
+            if (tipLayout) {
+                tipLayout->SetFontWeight(DWRITE_FONT_WEIGHT_BOLD,
+                                         DWRITE_TEXT_RANGE{0, static_cast<UINT32>(title.length())});
+            }
+            DWRITE_TEXT_METRICS tm = {};
+            if (tipLayout && SUCCEEDED(tipLayout->GetMetrics(&tm))) {
+                const float tipTop = std::max(rect.top + 6.0f * scale, tipBottom - tm.height - padY * 2.0f);
+                const D2D1_RECT_F tipRect = D2D1::RectF(tipLeft, tipTop, tipRight, tipBottom);
+                const float tipRadius = std::min(chipRadius, 10.0f * scale);
+
+                // The pill's own fill first so nothing behind shows through,
+                // then the raised card tint and a hairline on top.
+                ComPtr<ID2D1SolidColorBrush> tipFill;
+                target_->CreateSolidColorBrush(WithAlpha(material_.base, 0.97f * settingsOpacity_), &tipFill);
+                if (tipFill) {
+                    target_->FillRoundedRectangle(D2D1::RoundedRect(tipRect, tipRadius, tipRadius), tipFill.Get());
+                }
+                DrawCard(tipRect, tipRadius, true);
+                ComPtr<ID2D1SolidColorBrush> tipStroke;
+                target_->CreateSolidColorBrush(WithAlpha(material_.hairline, material_.hairline.a * 1.6f * settingsOpacity_), &tipStroke);
+                if (tipStroke) {
+                    target_->DrawRoundedRectangle(D2D1::RoundedRect(tipRect, tipRadius, tipRadius),
+                                                  tipStroke.Get(), 1.0f * scale);
+                }
+                // Accent tick linking the card to its chip.
+                if (iconStrong) {
+                    const float tickX = (hoveredChipRect.left + hoveredChipRect.right) * 0.5f;
+                    const float tickW = 14.0f * scale;
+                    target_->FillRoundedRectangle(
+                        D2D1::RoundedRect(D2D1::RectF(tickX - tickW * 0.5f, tipBottom - 2.5f * scale,
+                                                      tickX + tickW * 0.5f, tipBottom - 0.5f * scale),
+                                          1.0f * scale, 1.0f * scale), iconStrong.Get());
+                }
+
+                textBrush_->SetOpacity(0.94f);
+                target_->DrawTextLayout(D2D1::Point2F(tipLeft + padX, tipTop + padY), tipLayout.Get(),
+                                        textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
         }
 
         textBrush_->SetOpacity(0.96f);
@@ -14079,11 +14209,24 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_hoveredFileTrayRow.exchange(hoveredRow) != hoveredRow) {
                 g_layoutDirty = true;
             }
+
+            // Date & Weather chip explanation. The tab is always second in the
+            // loop (see ActiveTabCount); with Weather off it is the calendar.
+            int hoveredChip = -1;
+            if (g_settings.weather && currentTab == 1) {
+                hoveredChip = WeatherChipAtContentPoint(MediaContentFromClient(xPos, yPos));
+            }
+            if (g_hoveredWeatherChip.exchange(hoveredChip) != hoveredChip) {
+                g_layoutDirty = true;
+            }
             return 0;
         }
 
         case WM_MOUSELEAVE:
             if (g_hoveredMediaButton.exchange(-1) != -1) {
+                g_layoutDirty = true;
+            }
+            if (g_hoveredWeatherChip.exchange(-1) != -1) {
                 g_layoutDirty = true;
             }
             return 0;
@@ -14806,6 +14949,10 @@ DWORD WINAPI RenderThreadProc(void*) {
         }
         if (!hover && g_hoveredMediaButton.load() != -1) {
             g_hoveredMediaButton = -1;
+            needsRender = true;
+        }
+        if (!hover && g_hoveredWeatherChip.load() != -1) {
+            g_hoveredWeatherChip = -1;
             needsRender = true;
         }
         // Fixes windhawk-mods#4738: active playback used to count as a continuous

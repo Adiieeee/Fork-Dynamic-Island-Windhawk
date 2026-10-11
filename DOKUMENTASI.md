@@ -2,7 +2,7 @@
 
 Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rusak (misalnya setelah update Windows), dokumen ini menjelaskan **perilaku yang seharusnya**, **di mana kodenya**, dan **API Windows apa yang dipakai**, supaya perbaikan bisa mengembalikan fungsi yang sama persis.
 
-- **Versi kode saat dokumen ditulis:** `1.7.4` (header `@version`), sekitar 15.700 baris.
+- **Versi kode saat dokumen ditulis:** `1.7.5` (header `@version`), sekitar 15.700 baris.
 - **Nomor baris** di bawah berlaku untuk versi ini dan akan bergeser saat kode berubah. **Selalu cari nama fungsinya** (misalnya `grep -n "DrawMinimizedLine" mod.wh.cpp`). Nama fungsi adalah acuan utama; nomor baris hanya petunjuk awal.
 - Konvensi umum proyek (proses tool-mod, threading, lokalisasi) juga diringkas di `CLAUDE.md`.
 
@@ -53,7 +53,7 @@ Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rus
 "/c/Program Files/Windhawk/Compiler/bin/clang++.exe" -fsyntax-only -Wall -std=c++23 \
   -target x86_64-w64-mingw32 -DWH_MOD -DUNICODE -D_UNICODE \
   -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
-  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.4"' \
+  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.5"' \
   -include windhawk_api.h -x c++ mod.wh.cpp
 ```
 
@@ -109,7 +109,7 @@ DND tidak memakai thread sendiri, tapi subscription WNF (`SubscribeDndNotificati
 | `WM_DEVICECHANGE` | notifikasi USB/COM (`DBT_DEVICEARRIVAL` / `DBT_DEVICEREMOVECOMPLETE`) |
 | `WM_POWERBROADCAST` | setelah resume dari sleep: refresh cuaca, lalu nudge |
 | `WM_CLIPBOARDUPDATE` | `CaptureClipboard` (±6889) |
-| `WM_SETCURSOR` / `WM_MOUSEMOVE` / `WM_LBUTTONDOWN` / `WM_LBUTTONUP` | hit-test tombol media, scrubber, File Tray, swipe tab, klik untuk expand |
+| `WM_SETCURSOR` / `WM_MOUSEMOVE` / `WM_LBUTTONDOWN` / `WM_LBUTTONUP` | hit-test tombol media, scrubber, File Tray, chip cuaca (penjelasan saat hover), swipe tab, klik untuk expand |
 | `WM_MOUSEWHEEL` | ganti tab dashboard (debounce 150ms) |
 | `WM_MBUTTONUP` | toggle mute (`ToggleEndpointMute`) |
 | `WM_LBUTTONDBLCLK` | toggle "Pin expanded" |
@@ -119,7 +119,7 @@ DND tidak memakai thread sendiri, tapi subscription WNF (`SubscribeDndNotificati
 ID `WM_APP` yang terpakai: `+0x442` LAYOUT_CHANGED, `+0x443` NEW_EVENT, `+0x444` CAPSLOCK, `+0x446` MOUSE_WAKE, `+0x447` APPLY_HOTKEY, `+0x448` APPLY_BACKDROP, `+0x449` VOLUME_KEY.
 
 ### 2.5 Kopling layout ↔ hit-test
-Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLayout` (±559), `FileTrayLayout` (±644), `IdleStripLayout` (±681), dan `GameOverlayLayout` (±715). Hit-test media memakai `MediaContentFromClient`, yang membaca geometri frame terakhir lewat seqlock, lalu `MediaTransportHitTest` (±1725), `MediaScrubFractionFromContent` (±1767), dan `MediaArtHitTest`.
+Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLayout` (±559), `FileTrayLayout` (±644), `WeatherLayout` (kolom kanan dan chip tab Tanggal & Cuaca, ±685), `IdleStripLayout` (±681), dan `GameOverlayLayout` (±715). Hit-test media memakai `MediaContentFromClient`, yang membaca geometri frame terakhir lewat seqlock, lalu `MediaTransportHitTest` (±1725), `MediaScrubFractionFromContent` (±1767), dan `MediaArtHitTest`.
 
 **Pengecualian (1.7.4):** saat panah ganti player tampil, ujung scrubber mengikuti lebar teks waktu yang diukur, jadi tidak bisa berupa konstanta. `DrawMedia` menulis posisinya ke `g_scrubInsetLeft` / `g_scrubInsetRight`, dan hit-test scrubber membaca atomic itu.
 
@@ -376,6 +376,7 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
      - ikon cuaca vektor 60px (`DrawWeatherIcon`) dan suhu dengan face 63px yang sama dengan angka tanggal (`calDayLargeFormat_`, alignment disimpan lalu dikembalikan);
      - deskripsi (`weatherDescFormat_`, maksimal 2 baris di `top+99…123`, ukuran font adaptif 11,5 → 9,5);
      - **3 chip** (tinggi 28, rata bawah dengan hero, bobot lebar 1,3 : 1 : 1). Isinya glyph `DrawMetricGlyph` 0/1/2 (angin, termometer, tetes) ditambah angka dalam `boldTextFormat_`, tanpa label. Sejak 1.7.2 visual kompas, termometer, dan ring di 1.7.1 dihapus karena terlalu berat.
+     - **Penjelasan saat hover (sejak 1.7.5):** kursor di atas chip memunculkan kartu kecil di atas baris chip, selebar kolom kanan: nama chip (tebal) lalu satu kalimat artinya (angin = kecepatan angin saat ini, terasa = seberapa hangat atau dingin yang benar-benar dirasakan, kelembapan = kadar uap air di udara). Chip yang di-hover juga digambar `raisedStrong`. `WM_MOUSEMOVE` menghitung chip lewat `WeatherChipAtContentPoint` (hanya saat Weather aktif dan tab indeks 1) ke `g_hoveredWeatherChip`; di-reset saat `WM_MOUSELEAVE` atau kursor keluar island. Geometri chip berasal dari `WeatherLayout::ChipSpan`, dipakai bersama oleh gambar dan hit-test. Teksnya dilokalkan untuk 12 bahasa.
    - Kalau modul **Weather mati**, tab ini kembali menjadi `DrawCalendarDashboard`: hero ditambah grid bulan, dengan hari ini ditandai warna aksen.
    - `DrawWeatherDashboard` lama sudah dihapus.
 3. Hardware Monitor (opsional): `DrawHardwareMonitorDashboard` (±9634). CPU, RAM, GPU (PDH `\GPU Engine(*)\Utilization Percentage`), disk, jaringan (PDH `\Network Interface(*)\Bytes Sent/Received/sec`). Bar menjadi kuning di atas 75% dan merah di atas 90%.
@@ -551,6 +552,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | 1.4.0 | **Lirik LRCLIB** di pill collapsed (+ toggle, cache, retry); pembacaan cover bertahap; **cover cadangan iTunes**; `HttpGet` aman untuk biner + timeout; lebar pill dinamis mengikuti lirik (lead 0,35 detik, jeda ≥ 4 detik kembali normal); setting **Lyrics delay (ms)** |
 | 1.5.0 | **Minimize**: garis glass + waveform, menempel 3px dari tepi layar, hitbox kecil tanpa jeda, hover membuka card |
 | 1.6.0 | **Notifikasi inline** di tengah pill musik (tanpa pill kedua, lebar mengikuti notifikasi, maks 460); **tab Aktivitas** untuk Timer/Progress; durasi notifikasi sesaat maksimal 3 detik |
+| 1.7.5 | **Penjelasan chip cuaca saat hover**: angin, terasa, dan kelembapan di tab Tanggal & Cuaca memunculkan kartu penjelasan singkat (12 bahasa); geometri chip dipindah ke `WeatherLayout` |
 | 1.7.4 | **Ganti player**: panah di baris scrubber untuk memilih sesi SMTC yang diikuti island (`pinnedMediaSource`, `SwitchMediaSession`, command 5/6), poll media seketika lewat `g_mediaRefreshEvent`; card expanded 400px; teks waktu dan ujung scrubber mengikuti panah dengan jarak sama di kedua sisi. **Garis fullscreen video bisa di-hover** untuk membuka card (setelah island menjadi garis), dan tidak lagi ikut auto-hide idle. Titik privasi (mic/kamera) tidak lagi menahan pill di atas video; deteksi video juga menerima sesi yang tidak Playing (Zen/Firefox, video di-pause); log diagnostik `Video line:` |
 | 1.7.3 | Teks notif clipboard 12px (`clipboardTextFormat_`, juga di pill inline lewat `InlineAlertContent::primaryFormat`); **island sembunyi langsung saat overlay screenshot** (`IsScreenSnipActive`, tanpa topmost/alert sampai selesai; tidak di-exclude dari capture); kotak tanggal tab Tanggal & Cuaca 112px; tombol volume di 100%/0% tetap memunculkan pill |
 | 1.7.2 | Chip cuaca kembali sederhana (glyph + angka), ikon cuaca 60px. **Fallback Open-Meteo** saat wttr.in gagal/timeout (`FetchOpenMeteo`, `GeocodeCityOpenMeteo`, `WmoToWwoCode`); wttr.in dilewati selama 1 jam setelah gagal. Log: `Weather: Requesting fallback from api.open-meteo.com`, `Weather parsed success (Open-Meteo)` |
