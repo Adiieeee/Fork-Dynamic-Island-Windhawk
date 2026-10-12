@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.7.7
+// @version         1.7.8
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -576,6 +576,9 @@ namespace MediaLayout {
     // scrubber row have room beside the times without crowding the card edge.
     constexpr float kExpandedWidth = 400.0f;
     constexpr float kExpandedHeight = 184.0f;
+
+    // A cover that arrives late fades in over the placeholder for this long.
+    constexpr double kArtFadeSeconds = 0.25;
 
     constexpr float kScrubberY = 114.0f;
     constexpr float kScrubMargin = 24.0f;
@@ -4604,9 +4607,11 @@ DWORD WINAPI MediaThreadProc(void*) {
                 g_idleTab = 0;
             }
 
+            // Same track: keep the cover on screen, whether SMTC or the iTunes
+            // fallback supplied it. This used to also require the position not
+            // to move backwards, so a seek or a replay dropped a fallback cover.
             if (!g_state.media.art.bgra.empty() &&
-                next.title == g_state.media.title && next.artist == g_state.media.artist &&
-                next.positionTicks >= g_state.media.positionTicks) {
+                next.title == g_state.media.title && next.artist == g_state.media.artist) {
                 next.art = g_state.media.art;
                 next.artGeneration = g_state.media.artGeneration;
                 next.artChangedAt = g_state.media.artChangedAt;
@@ -5510,7 +5515,7 @@ std::string HttpGet(const wchar_t* host, const wchar_t* path, bool https = true)
     std::string response;
     HINTERNET hSession = WinHttpOpen(L"DynamicIsland/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) {
-        Wh_Log(L"Weather HttpGet: WinHttpOpen failed with error %lu", GetLastError());
+        Wh_Log(L"HttpGet: WinHttpOpen failed with error %lu", GetLastError());
         return response;
     }
 
@@ -5534,20 +5539,20 @@ std::string HttpGet(const wchar_t* host, const wchar_t* path, bool https = true)
                             // embedded NUL bytes.
                             response.append(buffer.data(), downloaded);
                         } else {
-                            Wh_Log(L"Weather HttpGet: WinHttpReadData failed with error %lu", GetLastError());
+                            Wh_Log(L"HttpGet: WinHttpReadData failed with error %lu", GetLastError());
                         }
                     }
                 } while (size > 0);
             } else {
-                Wh_Log(L"Weather HttpGet: WinHttpSendRequest/ReceiveResponse failed with error %lu", GetLastError());
+                Wh_Log(L"HttpGet: WinHttpSendRequest/ReceiveResponse failed with error %lu", GetLastError());
             }
             WinHttpCloseHandle(hRequest);
         } else {
-            Wh_Log(L"Weather HttpGet: WinHttpOpenRequest failed with error %lu", GetLastError());
+            Wh_Log(L"HttpGet: WinHttpOpenRequest failed with error %lu", GetLastError());
         }
         WinHttpCloseHandle(hConnect);
     } else {
-        Wh_Log(L"Weather HttpGet: WinHttpConnect failed with error %lu", GetLastError());
+        Wh_Log(L"HttpGet: WinHttpConnect failed with error %lu", GetLastError());
     }
     WinHttpCloseHandle(hSession);
     return response;
@@ -6474,36 +6479,152 @@ bool ArtistNamesMatch(const std::wstring& a, const std::wstring& b) {
            (x.find(firstY) != std::wstring::npos || y.find(firstX) != std::wstring::npos);
 }
 
-// Looks the track up on iTunes and decodes a 600px cover into *out.
-// networkFailed is set when no answer came back at all, so the caller can retry.
-bool FetchArtworkFromItunes(const std::wstring& title, const std::wstring& artist,
-                            BitmapPixels* out, bool* networkFailed) {
+// Title reduced to its letters and digits, lowercased, with the version/feature
+// suffix SimplifyTrackTitle drops. "Adagio sostenuto" and "Adagio Sostenuto"
+// compare equal, and so do "Song (Remastered)" and "Song - Live".
+std::wstring NormalizeTitleForMatch(const std::wstring& title) {
+    const std::wstring simplified = ToLowerCopy(SimplifyTrackTitle(title));
+    std::wstring out;
+    out.reserve(simplified.size());
+    for (wchar_t c : simplified) {
+        if (iswalnum(c)) {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+// The ISO 3166 code of the user's Windows region ("ID", "US", ...), so the
+// lookup searches the store the user's music is most likely listed in.
+std::wstring UserStoreCountryCode() {
+    wchar_t iso2[16] = {};
+    const GEOID geo = GetUserGeoID(GEOCLASS_NATION);
+    if (geo != GEOID_NOT_AVAILABLE && GetGeoInfoW(geo, GEO_ISO2, iso2, ARRAYSIZE(iso2), 0) > 0) {
+        return iso2;
+    }
+    if (GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, LOCALE_SISO3166CTRYNAME, iso2, ARRAYSIZE(iso2)) > 0) {
+        return iso2;
+    }
+    return std::wstring();
+}
+
+enum class ItunesMatch { None, ArtistOnly, TitleOnly, ArtistAndTitle };
+
+const wchar_t* ItunesMatchName(ItunesMatch match) {
+    switch (match) {
+        case ItunesMatch::ArtistAndTitle: return L"artist+title";
+        case ItunesMatch::TitleOnly: return L"title";
+        case ItunesMatch::ArtistOnly: return L"artist";
+        default: return L"none";
+    }
+}
+
+// One iTunes Search request. Picks the best result in this order: artist and
+// title both match; the title matches exactly (classical and compilations
+// credit the performer, never the composer Spotify reports); the artist alone
+// when allowArtistOnly. Returns false with *networkFailed set when no valid
+// answer came back (no response, or a rate-limit/error page instead of JSON).
+bool SearchItunesArtwork(const std::wstring& term, const std::wstring& country,
+                         const std::wstring& title, const std::wstring& artist,
+                         bool allowArtistOnly, std::string* artworkUrl,
+                         ItunesMatch* match, bool* networkFailed) {
     *networkFailed = false;
-    const std::wstring term = artist + L" " + SimplifyTrackTitle(title);
-    const std::wstring path = L"/search?media=music&entity=song&limit=10&term=" + PercentEncodeUtf8(term);
+    *match = ItunesMatch::None;
+    std::wstring path = L"/search?media=music&entity=song&limit=15&term=" + PercentEncodeUtf8(term);
+    if (!country.empty()) {
+        path += L"&country=" + country;
+    }
     const std::string body = HttpGet(L"itunes.apple.com", path.c_str());
-    if (body.empty()) {
+    if (body.find("\"resultCount\"") == std::string::npos) {
         *networkFailed = true;
         return false;
     }
 
-    // Each result lists artistName before its artworkUrl100.
-    std::string artworkUrl;
-    size_t from = 0;
-    std::string resultArtist;
-    while (NextJsonStringField(body, "artistName", &from, &resultArtist)) {
-        size_t urlFrom = from;
-        std::string url;
-        if (!NextJsonStringField(body, "artworkUrl100", &urlFrom, &url)) {
-            break;
+    const std::wstring wantTitle = NormalizeTitleForMatch(title);
+    // Every result object starts with its wrapperType, so slicing on it keeps
+    // each artist/title/artwork triple together whatever the field order.
+    constexpr std::string_view kResultStart = "\"wrapperType\"";
+    size_t start = body.find(kResultStart);
+    while (start != std::string::npos) {
+        const size_t next = body.find(kResultStart, start + kResultStart.size());
+        const std::string result = body.substr(start, next == std::string::npos ? std::string::npos : next - start);
+        start = next;
+
+        std::string resultArtist, resultTitle, url;
+        size_t from = 0;
+        NextJsonStringField(result, "artistName", &from, &resultArtist);
+        from = 0;
+        NextJsonStringField(result, "trackName", &from, &resultTitle);
+        from = 0;
+        if (!NextJsonStringField(result, "artworkUrl100", &from, &url) || url.empty()) {
+            continue;
         }
-        from = urlFrom;
-        if (ArtistNamesMatch(Utf8ToWide(resultArtist), artist)) {
-            artworkUrl = std::move(url);
-            break;
+
+        const std::wstring gotTitle = NormalizeTitleForMatch(Utf8ToWide(resultTitle));
+        const bool titleExact = !wantTitle.empty() && gotTitle == wantTitle;
+        const bool titleLoose = titleExact ||
+            (!wantTitle.empty() && !gotTitle.empty() &&
+             std::min(wantTitle.size(), gotTitle.size()) >= 3 &&
+             (gotTitle.find(wantTitle) != std::wstring::npos || wantTitle.find(gotTitle) != std::wstring::npos));
+        const bool artistOk = ArtistNamesMatch(Utf8ToWide(resultArtist), artist);
+
+        ItunesMatch quality = ItunesMatch::None;
+        if (artistOk && titleLoose) {
+            quality = ItunesMatch::ArtistAndTitle;
+        } else if (titleExact) {
+            quality = ItunesMatch::TitleOnly;
+        } else if (artistOk && allowArtistOnly) {
+            quality = ItunesMatch::ArtistOnly;
+        }
+        if (quality > *match) {
+            *match = quality;
+            *artworkUrl = std::move(url);
+            if (quality == ItunesMatch::ArtistAndTitle) {
+                break;
+            }
         }
     }
+    return *match != ItunesMatch::None;
+}
+
+// Looks the track up on iTunes and decodes a 600px cover into *out. Tries the
+// user's own store first, then the US store, then the bare title.
+// networkFailed is set when no lookup got a valid answer, so the caller retries.
+bool FetchArtworkFromItunes(const std::wstring& title, const std::wstring& artist,
+                            bool browserSource, BitmapPixels* out, bool* networkFailed) {
+    *networkFailed = false;
+    const std::wstring simpleTitle = SimplifyTrackTitle(title);
+    std::wstring country = UserStoreCountryCode();
+    for (auto& c : country) c = static_cast<wchar_t>(towupper(c));
+
+    struct Attempt { std::wstring term; std::wstring country; bool allowArtistOnly; };
+    std::vector<Attempt> attempts;
+    const std::wstring fullTerm = artist.empty() ? simpleTitle : artist + L" " + simpleTitle;
+    // A browser tab's "artist" is usually a channel or site name, so an artist
+    // match alone would happily hand a video some unrelated album's cover.
+    attempts.push_back({fullTerm, country, !browserSource});
+    if (country != L"US") {
+        attempts.push_back({fullTerm, L"US", !browserSource});
+    }
+    if (!artist.empty()) {
+        attempts.push_back({simpleTitle, country, false});
+    }
+
+    std::string artworkUrl;
+    ItunesMatch match = ItunesMatch::None;
+    bool anyAnswer = false;
+    for (const Attempt& attempt : attempts) {
+        bool failed = false;
+        if (SearchItunesArtwork(attempt.term, attempt.country, title, artist,
+                                attempt.allowArtistOnly, &artworkUrl, &match, &failed)) {
+            Wh_Log(L"Album art: iTunes matched by %s (store %s)", ItunesMatchName(match),
+                   attempt.country.empty() ? L"default" : attempt.country.c_str());
+            break;
+        }
+        anyAnswer = anyAnswer || !failed;
+    }
     if (artworkUrl.empty()) {
+        *networkFailed = !anyAnswer;
         return false;
     }
 
@@ -6525,11 +6646,14 @@ bool FetchArtworkFromItunes(const std::wstring& title, const std::wstring& artis
     const std::wstring imagePath = Utf8ToWide(artworkUrl.substr(slash));
 
     const std::string image = HttpGet(host.c_str(), imagePath.c_str());
-    if (image.empty()) {
+    // An empty or undecodable body is a failed download (or an error page), not
+    // a verdict that the cover doesn't exist, so it is retried rather than cached.
+    if (image.empty() ||
+        !DecodeImageBytesToPixels(std::vector<uint8_t>(image.begin(), image.end()), out)) {
         *networkFailed = true;
         return false;
     }
-    return DecodeImageBytesToPixels(std::vector<uint8_t>(image.begin(), image.end()), out);
+    return true;
 }
 
 DWORD WINAPI ArtworkThreadProc(void*) {
@@ -6551,6 +6675,7 @@ DWORD WINAPI ArtworkThreadProc(void*) {
     while (WaitForSingleObject(g_stopEvent, 1000) == WAIT_TIMEOUT) {
         std::wstring title, artist, key;
         bool artMissing = false;
+        bool browserSource = false;
         {
             std::lock_guard lock(g_stateMutex);
             if (g_state.media.available) {
@@ -6558,6 +6683,7 @@ DWORD WINAPI ArtworkThreadProc(void*) {
                 artMissing = g_state.media.art.bgra.empty();
                 title = g_state.media.title;
                 artist = g_state.media.artist;
+                browserSource = IsBrowserMediaSource(g_state.media.sourceAppUserModelId);
             }
         }
         const double now = NowSeconds();
@@ -6565,25 +6691,31 @@ DWORD WINAPI ArtworkThreadProc(void*) {
             missingKey.clear();
             continue;
         }
-        if (key != missingKey) {
-            missingKey = key;
-            missingSince = now;
-            continue;
-        }
-        if (now - missingSince < kMissingArtGraceSeconds ||
-            (key == attemptedKey && now < retryAt)) {
-            continue;
-        }
-        attemptedKey = key;
-        retryAt = std::numeric_limits<double>::infinity();
 
         BitmapPixels art;
         auto cached = cache.find(key);
-        if (cached != cache.end()) {
+        if (cached != cache.end() && !cached->second.bgra.empty()) {
+            // A cover found earlier for this track went missing again (a
+            // pause/resume or seek made the media poll drop it). Put it straight
+            // back instead of waiting out the grace period or the retry gate.
             art = cached->second;
         } else {
+            if (key != missingKey) {
+                missingKey = key;
+                missingSince = now;
+                continue;
+            }
+            if (now - missingSince < kMissingArtGraceSeconds ||
+                (key == attemptedKey && now < retryAt) ||
+                cached != cache.end()) {
+                continue;
+            }
+            attemptedKey = key;
+            retryAt = std::numeric_limits<double>::infinity();
+
             bool networkFailed = false;
-            if (!FetchArtworkFromItunes(title, artist, &art, &networkFailed)) {
+            Wh_Log(L"Album art: no SMTC cover after %.0fs, asking iTunes", kMissingArtGraceSeconds);
+            if (!FetchArtworkFromItunes(title, artist, browserSource, &art, &networkFailed)) {
                 art = BitmapPixels{};
             }
             if (WaitForSingleObject(g_stopEvent, 0) != WAIT_TIMEOUT) {
@@ -6591,6 +6723,7 @@ DWORD WINAPI ArtworkThreadProc(void*) {
             }
             if (networkFailed) {
                 retryAt = now + 30.0;  // try this track again later
+                Wh_Log(L"Album art: iTunes unreachable or refused, retrying in 30s");
                 continue;
             }
             if (cache.size() >= kCacheMax && !cacheOrder.empty()) {
@@ -9206,6 +9339,8 @@ class Renderer {
         scratchColorBrush_.Reset();
 
         artBitmap_.Reset();
+        placeholderArtBrush_.Reset();
+        placeholderGlyphFormat_.Reset();
         notificationIconBitmap_.Reset();
         mediaSourceIconBitmap_.Reset();
         clipboardIconBitmap_.Reset();
@@ -12934,6 +13069,92 @@ class Renderer {
         accentBrush_->SetOpacity(1.0f);
     }
 
+    // Stand-in cover for a track with no art (SMTC gave none and the iTunes
+    // fallback found none, or hasn't answered yet): a diagonal accent gradient
+    // with a music note centred on it. Drawn inside DrawAlbumArt's clip.
+    void DrawAlbumArtPlaceholder(D2D1_RECT_F rect, float radius) {
+        const D2D1_COLOR_F accent = accentBrush_ ? accentBrush_->GetColor() : D2D1::ColorF(0x4cc9f0);
+        auto mix = [](const D2D1_COLOR_F& a, float r, float g, float b, float t) {
+            return D2D1::ColorF(a.r + (r - a.r) * t, a.g + (g - a.g) * t, a.b + (b - a.b) * t, 1.0f);
+        };
+        const D2D1_COLOR_F light = mix(accent, 1.0f, 1.0f, 1.0f, 0.22f);
+        const D2D1_COLOR_F dark = mix(accent, 0.0f, 0.0f, 0.0f, 0.45f);
+
+        // The stops only change with the accent; the end points follow the rect.
+        const bool sameStops = placeholderArtBrush_ &&
+            placeholderArtAccent_.r == accent.r && placeholderArtAccent_.g == accent.g &&
+            placeholderArtAccent_.b == accent.b;
+        if (!sameStops) {
+            placeholderArtBrush_.Reset();
+            D2D1_GRADIENT_STOP stops[2] = {{0.0f, light}, {1.0f, dark}};
+            ComPtr<ID2D1GradientStopCollection> stopCollection;
+            if (SUCCEEDED(target_->CreateGradientStopCollection(stops, 2, D2D1_GAMMA_2_2,
+                                                                D2D1_EXTEND_MODE_CLAMP, &stopCollection))) {
+                target_->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(rect.left, rect.top),
+                                                        D2D1::Point2F(rect.right, rect.bottom)),
+                    stopCollection.Get(), &placeholderArtBrush_);
+            }
+            placeholderArtAccent_ = accent;
+        }
+
+        const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(rect, radius, radius);
+        if (placeholderArtBrush_) {
+            placeholderArtBrush_->SetStartPoint(D2D1::Point2F(rect.left, rect.top));
+            placeholderArtBrush_->SetEndPoint(D2D1::Point2F(rect.right, rect.bottom));
+            target_->FillRoundedRectangle(shape, placeholderArtBrush_.Get());
+        } else if (accentBrush_) {
+            target_->FillRoundedRectangle(shape, accentBrush_.Get());
+        }
+
+        if (!scratchColorBrush_) {
+            target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &scratchColorBrush_);
+        }
+        if (!scratchColorBrush_) {
+            return;
+        }
+
+        // Soft sheen over the upper half for depth; a fill, not an edge line.
+        const float height = rect.bottom - rect.top;
+        scratchColorBrush_->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.07f));
+        target_->FillRectangle(D2D1::RectF(rect.left, rect.top, rect.right, rect.top + height * 0.5f),
+                               scratchColorBrush_.Get());
+
+        // Note colour picked against the gradient's midpoint, so a pale accent
+        // gets a dark note instead of white on near-white.
+        const D2D1_COLOR_F mid = mix(light, dark.r, dark.g, dark.b, 0.5f);
+        const float luminance = 0.2126f * mid.r + 0.7152f * mid.g + 0.0722f * mid.b;
+        scratchColorBrush_->SetColor(luminance > 0.6f ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.72f)
+                                                      : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.92f));
+
+        // Glyph sized to the cover, so it reads in the collapsed circle and the
+        // large expanded square alike. Half-pixel steps keep the format cached.
+        const float glyphSize = std::max(8.0f, std::round(std::min(rect.right - rect.left, height) * 0.42f * 2.0f) * 0.5f);
+        if (!placeholderGlyphFormat_ || placeholderGlyphSize_ != glyphSize) {
+            placeholderGlyphFormat_.Reset();
+            dwriteFactory_->CreateTextFormat(
+                usingFluentIcons_ ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets", nullptr,
+                DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                glyphSize, L"", &placeholderGlyphFormat_);
+            if (placeholderGlyphFormat_) {
+                placeholderGlyphFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                placeholderGlyphFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                placeholderGlyphFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            }
+            placeholderGlyphSize_ = glyphSize;
+        }
+        if (placeholderGlyphFormat_) {
+            target_->DrawTextW(L"", 1, placeholderGlyphFormat_.Get(), rect, scratchColorBrush_.Get(),
+                               D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        } else if (textFormat_) {
+            textFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            textFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            target_->DrawTextW(L"♪", 1, textFormat_.Get(), rect, scratchColorBrush_.Get());
+            textFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            textFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        }
+    }
+
     void DrawAlbumArt(const MediaSnapshot& media, D2D1_RECT_F rect, double now, float radius = 9.0f, bool drawBadge = true) {
         ComPtr<ID2D1RoundedRectangleGeometry> mask;
         HRESULT hrMask = d2dFactory_->CreateRoundedRectangleGeometry(
@@ -12947,33 +13168,33 @@ class Renderer {
             target_->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         }
 
+        // A cover that just arrived fades in over the placeholder instead of
+        // popping in.
+        float artAlpha = 0.0f;
         if (!media.art.bgra.empty()) {
             if (artGeneration_ != media.art.generation || !artBitmap_) {
                 D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
                     D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+                artBitmap_.Reset();
                 target_->CreateBitmap(D2D1::SizeU(media.art.width, media.art.height),
                                       media.art.bgra.data(), media.art.width * 4,
                                       &props, &artBitmap_);
                 artGeneration_ = media.art.generation;
             }
-
-            D2D1_RECT_F dst = D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom);
-            target_->DrawBitmap(artBitmap_.Get(), dst, 1.0f,
-                                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-        } else {
-            accentBrush_->SetOpacity(0.24f);
-            target_->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), accentBrush_.Get());
-            accentBrush_->SetOpacity(1.0f);
-            if (!media.sourceIcon.bgra.empty()) {
-                D2D1_RECT_F iconRect = D2D1::RectF(rect.left + 11, rect.top + 11,
-                                                  rect.right - 11, rect.bottom - 11);
-                DrawBitmapPixels(media.sourceIcon, iconRect, mediaSourceIconBitmap_,
-                                 mediaSourceIconGeneration_, 0.95f);
-            } else {
-                target_->DrawTextW(media.sourceBadge.empty() ? L"\u25b6" : media.sourceBadge.c_str(),
-                                   static_cast<UINT32>(media.sourceBadge.empty() ? 1 : media.sourceBadge.size()),
-                                   textFormat_.Get(), rect, textBrush_.Get());
+            if (artBitmap_) {
+                const double sinceArt = now - media.artChangedAt;
+                artAlpha = (sinceArt >= 0.0 && sinceArt < MediaLayout::kArtFadeSeconds)
+                    ? static_cast<float>(sinceArt / MediaLayout::kArtFadeSeconds)
+                    : 1.0f;
             }
+        }
+
+        if (artAlpha < 1.0f) {
+            DrawAlbumArtPlaceholder(rect, radius);
+        }
+        if (artAlpha > 0.0f) {
+            target_->DrawBitmap(artBitmap_.Get(), rect, artAlpha,
+                                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
         }
 
         if (drawBadge && !media.sourceIcon.bgra.empty()) {
@@ -14213,6 +14434,10 @@ class Renderer {
     MarqueeLayoutCache marqueeClipboardCache_;
     MarqueeLayoutCache marqueeNotificationCache_;
     ComPtr<ID2D1Bitmap> artBitmap_;
+    ComPtr<ID2D1LinearGradientBrush> placeholderArtBrush_;
+    D2D1_COLOR_F placeholderArtAccent_{};
+    ComPtr<IDWriteTextFormat> placeholderGlyphFormat_;
+    float placeholderGlyphSize_ = 0.0f;
     ComPtr<ID2D1Bitmap> notificationIconBitmap_;
     ComPtr<ID2D1Bitmap> mediaSourceIconBitmap_;
     ComPtr<ID2D1Bitmap> clipboardIconBitmap_;
@@ -16214,6 +16439,12 @@ DWORD WINAPI RenderThreadProc(void*) {
 
         // Privacy dots
         if (snapshot.system.micActive || snapshot.system.cameraActive) {
+            needsRender = true;
+        }
+
+        // Keep painting while a newly arrived cover fades in over the placeholder.
+        if (!snapshot.media.art.bgra.empty() &&
+            NowSeconds() - snapshot.media.artChangedAt < MediaLayout::kArtFadeSeconds + 0.05) {
             needsRender = true;
         }
 

@@ -54,7 +54,7 @@ Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rus
 "/c/Program Files/Windhawk/Compiler/bin/clang++.exe" -fsyntax-only -Wall -std=c++23 \
   -target x86_64-w64-mingw32 -DWH_MOD -DUNICODE -D_UNICODE \
   -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
-  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.7"' \
+  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.8"' \
   -include windhawk_api.h -x c++ mod.wh.cpp
 ```
 
@@ -252,7 +252,7 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 
 ## 6. Fitur: Cover album & fallback iTunes
 
-**Perilaku:** cover diambil dari thumbnail SMTC. Kalau setelah **4 detik** sebuah lagu masih tanpa cover, cover diambil dari **iTunes Search API** (600×600, dicocokkan dengan nama artis). Cover dari SMTC selalu diutamakan.
+**Perilaku:** cover diambil dari thumbnail SMTC. Kalau setelah **4 detik** sebuah lagu masih tanpa cover, cover diambil dari **iTunes Search API** (600×600). Cover dari SMTC selalu diutamakan. Kalau semuanya gagal, tampil **placeholder gradient aksen + ikon nada** (sejak 1.7.8), dan cover yang datang belakangan muncul dengan fade 0,25 detik.
 
 | Fungsi | ±Baris | Peran |
 |---|---|---|
@@ -260,12 +260,13 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 | `DecodeImageBytesToPixels` | 3061 | WIC decode ke BGRA premultiplied, mengisi `generation` dan `sampledAccent` (warna aksen UI) |
 | Logika "settle" cover | di `MediaThreadProc` | selama 3 detik setelah ganti lagu, cover terus diambil ulang (browser sering terlambat mengganti cover); cover lama dipertahankan kalau fetch sesaat gagal |
 | `ArtistNamesMatch` | 5686 | pencocokan artis longgar (contains, artis pertama sebelum `,`/`&`) |
-| `FetchArtworkFromItunes` | 5703 | `itunes.apple.com/search?media=music&entity=song&limit=10&term=...`, ganti `100x100bb` jadi `600x600bb` |
-| `ArtworkThreadProc` | 5759 | cek tiap 1 detik, grace 4 detik, cache 30, retry 30 detik saat jaringan gagal, log `"Album art: ..."` |
+| `SearchItunesArtwork` | ±6520 | satu request `itunes.apple.com/search?...&limit=15&term=...&country=..`; hasil dipotong per `"wrapperType"`; prioritas: artis+judul cocok → judul persis sama (`NormalizeTitleForMatch`, untuk klasik/kompilasi yang mencantumkan performer, bukan komposer) → artis saja (bukan untuk sumber browser). Body tanpa `"resultCount"` (rate limit/403) = gagal jaringan |
+| `FetchArtworkFromItunes` | ±6590 | urutan: store region Windows user (`UserStoreCountryCode`) → store US → judul saja; ganti `100x100bb` jadi `600x600bb`; download/decode gagal = gagal jaringan (di-retry, tidak di-cache) |
+| `ArtworkThreadProc` | ±6670 | cek tiap 1 detik, grace 4 detik, cache 30, retry 30 detik saat jaringan gagal, log `"Album art: ..."`; kalau cover dari cache hilang lagi (pause/seek) langsung dipasang ulang |
 | `HttpGet` | 4969 | WinHTTP GET (aman untuk biner, timeout 5/5/8/8 detik) |
-| `DrawAlbumArt` | 11301 | gambar cover; kalau kosong: ikon sumber atau badge teks |
+| `DrawAlbumArt` / `DrawAlbumArtPlaceholder` | ±13075 | gambar cover (fade-in `MediaLayout::kArtFadeSeconds`); kalau kosong: gradient diagonal dari warna aksen + glyph nada `` (warna glyph menyesuaikan terang/gelap aksen), badge ikon app di pojok saat expanded |
 
-**Kalau rusak:** yang tampil badge "SP" padahal lagu punya cover. Cek pembacaan stream (API Storage.Streams) dan decode WIC.
+**Kalau rusak:** yang tampil placeholder nada padahal lagu punya cover. Lihat log `Album art:` (DbgViewMini): "matched by ..." / "found no match" / "unreachable or refused". Kalau SMTC sendiri gagal, cek pembacaan stream (API Storage.Streams) dan decode WIC.
 
 ---
 
