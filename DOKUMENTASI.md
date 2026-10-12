@@ -2,7 +2,7 @@
 
 Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rusak (misalnya setelah update Windows), dokumen ini menjelaskan **perilaku yang seharusnya**, **di mana kodenya**, dan **API Windows apa yang dipakai**, supaya perbaikan bisa mengembalikan fungsi yang sama persis.
 
-- **Versi kode saat dokumen ditulis:** `1.7.6` (header `@version`), sekitar 15.700 baris.
+- **Versi kode saat dokumen ditulis:** `1.7.7` (header `@version`), sekitar 16.500 baris.
 - **Nomor baris** di bawah berlaku untuk versi ini dan akan bergeser saat kode berubah. **Selalu cari nama fungsinya** (misalnya `grep -n "DrawMinimizedLine" mod.wh.cpp`). Nama fungsi adalah acuan utama; nomor baris hanya petunjuk awal.
 - Konvensi umum proyek (proses tool-mod, threading, lokalisasi) juga diringkas di `CLAUDE.md`.
 
@@ -54,7 +54,7 @@ Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rus
 "/c/Program Files/Windhawk/Compiler/bin/clang++.exe" -fsyntax-only -Wall -std=c++23 \
   -target x86_64-w64-mingw32 -DWH_MOD -DUNICODE -D_UNICODE \
   -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
-  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.6"' \
+  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.7"' \
   -include windhawk_api.h -x c++ mod.wh.cpp
 ```
 
@@ -69,7 +69,7 @@ Windhawk menyuntikkan mod ke `windhawk.exe`, tapi island tidak boleh berjalan di
 
 - `Wh_ModInit` (±14765): kalau ini proses launcher, set `g_isToolModProcessLauncher`. Kalau ini proses `-tool-mod <id>`, buat mutex single-instance, panggil `WhTool_ModInit`, lalu hook entry point.
 - `Wh_ModAfterInit` (±14844): launcher menjalankan ulang `windhawk.exe -tool-mod "<WH_MOD_ID>"` lewat `CreateProcessInternalW`.
-- `WhTool_ModInit` (±14716): `LoadSettings()`, baca nilai tersimpan (`LyricsEnabled`, `IslandMinimized`), lalu `StartThreads()`.
+- `WhTool_ModInit` (±14716): `LoadSettings()`, baca nilai tersimpan (`LyricsEnabled`, `IslandMinimized`, `HardwareDiskLetter`), lalu `StartThreads()`.
 - `WhTool_ModUninit` (±14735): kirim `WM_CLOSE`, `StopThreads()`. Setelah itu proses `ExitProcess(0)`.
 - **Aturan:** logika overlay ada di `WhTool_*`, bukan di `Wh_*`.
 
@@ -94,9 +94,9 @@ Semua thread dibuat di `StartThreads()` (±14636) dan dihentikan oleh `StopThrea
 DND tidak memakai thread sendiri, tapi subscription WNF (`SubscribeDndNotification`, ±4199).
 
 ### 2.3 State bersama
-- **`SharedState g_state`** (struct ±1236) dijaga **`g_stateMutex`**. Isinya: `media`, `lyrics`, `clipboard`, `notification`, `volume`, `capsLock`, `timer`, `device`, `bluetoothDevice`, `doNotDisturb`, `battery`, `progress`, `system` (CPU/RAM/GPU/disk/net/volume/privasi/renderFps), `weather`, `waveform[48]` (ring buffer, ditulis lewat `waveformWrite`), `fileTrayItems`, serta (sejak 1.7.4) `playingMediaSources`, `mediaSessionSources` (AUMID semua sesi SMTC, tanpa duplikat) dan `pinnedMediaSource` (player yang dipilih lewat panah, kosong = otomatis).
+- **`SharedState g_state`** (struct ±1236) dijaga **`g_stateMutex`**. Isinya: `media`, `lyrics`, `clipboard`, `notification`, `volume`, `capsLock`, `timer`, `device`, `bluetoothDevice`, `doNotDisturb`, `battery`, `progress`, `system` (CPU/RAM/GPU/disk/net/volume/privasi/renderFps; sejak 1.7.7 juga `hwDiskLetter` / `hwDiskFreePercent` / `fixedDriveCount` untuk kartu DISK tab Hardware, sementara `diskFreePercent` tetap C: untuk game overlay), `weather`, `waveform[48]` (ring buffer, ditulis lewat `waveformWrite`), `fileTrayItems`, serta (sejak 1.7.4) `playingMediaSources`, `mediaSessionSources` (AUMID semua sesi SMTC, tanpa duplikat) dan `pinnedMediaSource` (player yang dipilih lewat panah, kosong = otomatis).
 - **`Settings g_settings`** (struct ±945) dijaga `g_settingsMutex`. Render loop memakai `GetSettingsCopy()` (±1303) sekali per frame.
-- **Atomic global penting** (±1290–1340): `g_layoutDirty` (minta repaint/reposisi), `g_idleTab` (tab dashboard aktif), `g_hoveredMediaButton` / `g_pressedMediaButton`, `g_scrubbing`, `g_manuallyHidden`, `g_autoHiddenParked`, `g_lyricsEnabled`, `g_lyricsDelayMs`, `g_islandMinimized`, `g_minimizedEdgeFraction`, `g_activityTabVisible`, `g_audioCaptureNeeded`, `g_mediaSessionCount` (jumlah player, untuk menampilkan panah ganti player), `g_scrubInsetLeft` / `g_scrubInsetRight` (posisi ujung scrubber yang benar-benar digambar).
+- **Atomic global penting** (±1290–1340): `g_layoutDirty` (minta repaint/reposisi), `g_idleTab` (tab dashboard aktif), `g_hoveredMediaButton` / `g_pressedMediaButton`, `g_scrubbing`, `g_manuallyHidden`, `g_autoHiddenParked`, `g_lyricsEnabled`, `g_lyricsDelayMs`, `g_islandMinimized`, `g_minimizedEdgeFraction`, `g_activityTabVisible`, `g_audioCaptureNeeded`, `g_mediaSessionCount` (jumlah player, untuk menampilkan panah ganti player), `g_scrubInsetLeft` / `g_scrubInsetRight` (posisi ujung scrubber yang benar-benar digambar), `g_hwDiskLetter` (drive di kartu DISK tab Hardware, sejak 1.7.7) dan `g_hoveredHwDiskArrow` (kursor di atas panah ganti drive).
 
 ### 2.4 Pesan window (`OverlayWndProc`, ±12972)
 
@@ -121,7 +121,7 @@ DND tidak memakai thread sendiri, tapi subscription WNF (`SubscribeDndNotificati
 ID `WM_APP` yang terpakai: `+0x442` LAYOUT_CHANGED, `+0x443` NEW_EVENT, `+0x444` CAPSLOCK, `+0x446` MOUSE_WAKE, `+0x447` APPLY_HOTKEY, `+0x448` APPLY_BACKDROP, `+0x449` VOLUME_KEY.
 
 ### 2.5 Kopling layout ↔ hit-test
-Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLayout` (±559), `FileTrayLayout` (±644), `WeatherLayout` (kolom kanan dan chip tab Tanggal & Cuaca, ±685), `IdleStripLayout` (±681), dan `GameOverlayLayout` (±715). Hit-test media memakai `MediaContentFromClient`, yang membaca geometri frame terakhir lewat seqlock, lalu `MediaTransportHitTest` (±1725), `MediaScrubFractionFromContent` (±1767), dan `MediaArtHitTest`.
+Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLayout` (±559), `FileTrayLayout` (±644), `WeatherLayout` (kolom kanan dan chip tab Tanggal & Cuaca, ±685), `IdleStripLayout` (±681), `GameOverlayLayout` (±715), dan `HardwareLayout` (grid 2×2 tab Hardware dan panah ganti drive di kartu DISK, sejak 1.7.7; hit-test lewat `HardwareDiskArrowAtContentPoint`). Hit-test media memakai `MediaContentFromClient`, yang membaca geometri frame terakhir lewat seqlock, lalu `MediaTransportHitTest` (±1725), `MediaScrubFractionFromContent` (±1767), dan `MediaArtHitTest`.
 
 **Pengecualian (1.7.4):** saat panah ganti player tampil, ujung scrubber mengikuti lebar teks waktu yang diukur, jadi tidak bisa berupa konstanta. `DrawMedia` menulis posisinya ke `g_scrubInsetLeft` / `g_scrubInsetRight`, dan hit-test scrubber membaca atomic itu.
 
@@ -145,7 +145,7 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
    - `g_activityTabVisible` = timer atau progress aktif (§10).
 5. **Hover:** rect pill dihitung dari `GetWindowRect`, ditambah padding saat garis minimize (§7), baik minimize manual maupun garis fullscreen video. `isHoverExpanded` mengikuti setting Expand-on-hover (atau klik), dan dipaksa `hover` saat minimize atau `videoSuppressed`.
 6. **Auto-hide / fullscreen video:** `IsForegroundFullscreenVideo` (±3659) dicek tiap 0,5 detik **sebelum** `ChooseInlineAlert` (±14183), lalu menghasilkan `videoSuppressed` (±14178). Saat video, island menjadi garis minimize. Setelah itu `isHidden` dan `EnsureTopmost` (tiap 1 detik). Detail: §12 "Fullscreen video".
-7. **Poll sistem tiap 1 detik:** `UpdateSystemSnapshot` (±6124) membaca CPU, RAM, disk, dan level volume. GPU dan jaringan hanya dibaca kalau tab Hardware atau game overlay tampil.
+7. **Poll sistem tiap 1 detik:** `UpdateSystemSnapshot` (±6124) membaca CPU, RAM, disk (C: untuk game overlay, plus drive pilihan kartu DISK lewat `SampleHardwareDisk`), dan level volume. GPU hanya dibaca kalau tab Hardware atau game overlay tampil. Sejak 1.7.7 jaringan tidak dibaca sama sekali (`needNetStats = false`) karena tidak ada lagi yang menampilkannya; `GetNetworkUsage` tetap ada di kode.
 8. **Ukuran target:**
    - Idle: `MeasureIdleStrip`.
    - Game overlay: `GameOverlayLayout`.
@@ -405,14 +405,18 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
      - **Penjelasan saat hover (sejak 1.7.5):** kursor di atas chip memunculkan kartu kecil di atas baris chip, selebar kolom kanan: nama chip (tebal) lalu satu kalimat artinya (angin = kecepatan angin saat ini, terasa = seberapa hangat atau dingin yang benar-benar dirasakan, kelembapan = kadar uap air di udara). Chip yang di-hover juga digambar `raisedStrong`. `WM_MOUSEMOVE` menghitung chip lewat `WeatherChipAtContentPoint` (hanya saat Weather aktif dan tab indeks 1) ke `g_hoveredWeatherChip`; di-reset saat `WM_MOUSELEAVE` atau kursor keluar island. Geometri chip berasal dari `WeatherLayout::ChipSpan`, dipakai bersama oleh gambar dan hit-test. Teksnya dilokalkan untuk 12 bahasa.
    - Kalau modul **Weather mati**, tab ini kembali menjadi `DrawCalendarDashboard`: hero ditambah grid bulan, dengan hari ini ditandai warna aksen.
    - `DrawWeatherDashboard` lama sudah dihapus.
-3. Hardware Monitor (opsional): `DrawHardwareMonitorDashboard` (±9634). CPU, RAM, GPU (PDH `\GPU Engine(*)\Utilization Percentage`), disk, jaringan (PDH `\Network Interface(*)\Bytes Sent/Received/sec`). Bar menjadi kuning di atas 75% dan merah di atas 90%.
+3. Hardware Monitor (opsional): `DrawHardwareMonitorDashboard` (±10955). Sejak 1.7.7 berisi **4 kartu dalam grid 2×2**: CPU, RAM, GPU (PDH `\GPU Engine(*)\Utilization Percentage`), dan DISK. Kartu NET UP / NET DOWN dihapus.
+   - **Geometri** di `HardwareLayout`: jarak antar kartu 8px di kedua arah, tinggi kartu ±59px, sudut mengikuti bentuk island (`InsetCardRadius`, hampir kapsul untuk bentuk pill).
+   - **Isi kartu:** glyph `DrawMetricGlyph` 21px di dalam lingkaran (well) 34px berwarna tint 18%; label bold 12px putih 62%; nilai `textFormat_` 97%; bar 3px yang berhenti 22px dari tepi kanan. Warna tint dan bar: aksen, kuning di atas 75%, merah di atas 90% (`LoadStateColor`).
+   - **RAM:** nilai utama persen (`memoryPercent`, sama dengan Task Manager), diikuti keterangan redup kecil `used/total GB` (total dibulatkan ke GB utuh).
+   - **DISK:** persen terpakai dari drive pilihan, label `DISK C:`. Kalau ada lebih dari satu drive **fixed** (`GetDriveTypeW == DRIVE_FIXED`, tanpa USB/optik/jaringan), panah `›` muncul di tengah tinggi kartu, sejajar ujung bar. Hitbox-nya seluruh strip kanan kartu (22px kiri panah sampai tepi, setinggi kartu); hover hanya membuat panah lebih terang. Klik memanggil `CycleHardwareDisk` (C: → D: → … → C:), yang langsung memperbarui `g_state.system` dan menyimpan pilihan ke `Wh_SetIntValue("HardwareDiskLetter")`. Drive yang hilang jatuh ke drive fixed pertama.
 4. File Tray (opsional): `DrawFileTrayDashboard` (±9478). File di-drop ke island (`WM_DROPFILES`), hanya path yang disimpan, klik untuk membuka (`ShellExecuteExW`), kapasitas lewat `FileTrayMaxItems`.
 5. **Aktivitas** (otomatis, paling akhir): `DrawActivityDashboard` (±11903). Muncul saat Focus Timer berjalan atau progress aktif.
    - Timer: label Focus/Break (+Paused), countdown `mm:ss` besar, bar oranye (fokus) atau hijau (break), dan hint "Right-click the island to pause or stop".
    - Progress: label dan bar persen.
    - `ActivityTabIndex` (±1442) selalu indeks terakhir, jadi tab lain tidak bergeser.
 
-**Indeks:** `NormalizedTabIndex` (±1428, modulo jumlah tab), `HardwareMonitorTabIndex` (±1441, selalu `2` sejak 1.7.0, dipakai untuk memutuskan apakah GPU/net perlu dipoll), `FileTrayTabIndex` (±1448, `2 + hardware`). Modul Weather tidak lagi memengaruhi jumlah tab.
+**Indeks:** `NormalizedTabIndex` (±1428, modulo jumlah tab), `HardwareMonitorTabIndex` (±1441, selalu `2` sejak 1.7.0, dipakai untuk memutuskan apakah GPU perlu dipoll, dan untuk hover/klik panah drive DISK), `FileTrayTabIndex` (±1448, `2 + hardware`). Modul Weather tidak lagi memengaruhi jumlah tab.
 
 **Cuaca:** `WeatherThreadProc` (±5337): `wttr.in/<lokasi>?format=j1` (HTTPS, fallback HTTP), membaca `current_condition` dan `areaName` (label). Refresh tiap 15 menit. Kalau gagal ada backoff 1/2/5/15 menit. Refresh juga terjadi saat setting lokasi berubah (`cityChanged` mencakup `WeatherUseLocation`) atau resume dari sleep. Setting: `Weather`, `WeatherUseLocation`, `WeatherCity`, `WeatherFahrenheit`.
 - **Prioritas lokasi (1.6.3):**
@@ -505,6 +509,7 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
 |---|---|---|
 | `LyricsEnabled` | toggle lirik | ya |
 | `IslandMinimized` | mode minimize | ya |
+| `HardwareDiskLetter` | drive di kartu DISK tab Hardware (kode huruf, default `C`) | ya |
 | `ManuallyHidden` | disembunyikan lewat hotkey/menu | ya (dengan aturan reset di `LoadSettings`) |
 | `PinnedExpanded` | pin expanded | tidak (di-reset di `LoadSettings`) |
 | `GameOverlayPinned` | game overlay dari menu | ya |
@@ -560,7 +565,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | Garis tidak terbuka saat hover di atas video fullscreen / island tidak menjadi garis | `videoSuppressed`, `videoLineArmed`, `videoHoverOpen`, `videoLine`, `edgeSpring` di render loop | — |
 | Video tertentu tidak terdeteksi | baca log `Full screen, not video:` lalu tambah aturan di `WindowBelongsToMediaSource` | AUMID SMTC vs `PKEY_AppUserModel_ID` |
 | Cuaca tidak mengikuti lokasi laptop | `QueryWindowsLocation` (cek log `Weather: Windows location ...`), urutan fallback di `WeatherThreadProc` | `Windows.Devices.Geolocation`, izin lokasi desktop app |
-| Hardware monitor 0/kosong | `GetGpuUsage`, `GetNetworkUsage` | PDH counter berbahasa Inggris (`PdhAddEnglishCounterW`) |
+| Hardware monitor 0/kosong | `GetGpuUsage`, `SampleHardwareDisk` / `DriveFreePercent` (DISK) | PDH counter berbahasa Inggris (`PdhAddEnglishCounterW`) |
 | Posisi salah di multi-monitor | `GetAnchorWorkRect`, `MonitorEnumProc` | `EnumDisplayMonitors`, DPI |
 
 **Prinsip saat memperbaiki:**
@@ -579,6 +584,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | 1.4.0 | **Lirik LRCLIB** di pill collapsed (+ toggle, cache, retry); pembacaan cover bertahap; **cover cadangan iTunes**; `HttpGet` aman untuk biner + timeout; lebar pill dinamis mengikuti lirik (lead 0,35 detik, jeda ≥ 4 detik kembali normal); setting **Lyrics delay (ms)** |
 | 1.5.0 | **Minimize**: garis glass + waveform, menempel 3px dari tepi layar, hitbox kecil tanpa jeda, hover membuka card |
 | 1.6.0 | **Notifikasi inline** di tengah pill musik (tanpa pill kedua, lebar mengikuti notifikasi, maks 460); **tab Aktivitas** untuk Timer/Progress; durasi notifikasi sesaat maksimal 3 detik |
+| 1.7.7 | **Tab Hardware disederhanakan**: 4 kartu (CPU, RAM, GPU, DISK) dalam grid 2×2 dengan geometri di `HardwareLayout`; NET UP/DOWN dihapus dan counter jaringan tidak lagi dipoll; ikon 21px dalam well bulat, sudut kartu mengikuti bentuk island, label lebih terang; RAM menampilkan persen + `used/total GB`; **panah ganti drive** di kartu DISK (`CycleHardwareDisk`, disimpan di `HardwareDiskLetter`) |
 | 1.7.6 | **Brightness**: pill brightness seperti volume (WMI `WmiMonitorBrightnessEvent`), OSD brightness Windows disembunyikan (WinEvent hook ke explorer), tombol brightness dipelajari untuk kasus 0%/100%; setting `Brightness`; `DrawVolume` dan `DrawBrightness` berbagi `DrawLevelPill`; link `-lwbemuuid` |
 | 1.7.5 | **Penjelasan chip cuaca saat hover**: angin, terasa, dan kelembapan di tab Tanggal & Cuaca memunculkan kartu penjelasan singkat (12 bahasa); geometri chip dipindah ke `WeatherLayout` |
 | 1.7.4 | **Ganti player**: panah di baris scrubber untuk memilih sesi SMTC yang diikuti island (`pinnedMediaSource`, `SwitchMediaSession`, command 5/6), poll media seketika lewat `g_mediaRefreshEvent`; card expanded 400px; teks waktu dan ujung scrubber mengikuti panah dengan jarak sama di kedua sisi. **Garis fullscreen video bisa di-hover** untuk membuka card (setelah island menjadi garis), dan tidak lagi ikut auto-hide idle. Titik privasi (mic/kamera) tidak lagi menahan pill di atas video; deteksi video juga menerima sesi yang tidak Playing (Zen/Firefox, video di-pause); log diagnostik `Video line:` |

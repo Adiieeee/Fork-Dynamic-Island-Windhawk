@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.7.6
+// @version         1.7.7
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -31,7 +31,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 | **Media Player** | Shows live album art, track details, audio waveforms, and full playback controls. Synced lyrics (from [LRCLIB](https://lrclib.net)) scroll along in the collapsed pill; toggle them with the lyrics button next to the playback controls. | ![Media](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/media-v2.png) |
 | **Calendar** | A monthly grid that always fits its rows, with today marked in the accent colour. | ![Calendar](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/calendar.png) |
 | **Weather** | Real-time weather stats powered by wttr.in, including wind speed, humidity, and "feels like" temperature. Hover a chip for a short explanation of what it means. | ![Weather](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/weather-v2.png) |
-| **Hardware Monitor** | CPU, RAM, GPU, disk and live network throughput, with load bars that turn amber past 75% and red past 90%. | ![Hardware Monitor](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/hardware-monitor.png) |
+| **Hardware Monitor** | CPU, RAM, GPU and disk usage (the arrow on the disk card switches between drives), with load bars that turn amber past 75% and red past 90%. | ![Hardware Monitor](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/hardware-monitor.png) |
 | **Game Overlay** | Real-time FPS, CPU, GPU, RAM and disk, sized to whichever metrics you enable. | ![Gamebar](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/gamebar-v2.png) |
 | **Idle View** | A minimal dashboard with your battery status, digital clock, and sleek pagination dots. | ![Idle](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/idle-v2.png) |
 | **Camera Privacy** | Shows a green dot when an app is actively using your webcam. | ![Camera](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/camera-detected-v2.png) |
@@ -713,6 +713,74 @@ namespace WeatherLayout {
     }
 }
 
+// Layout for the Hardware Monitor card's 2 x 2 tile grid (CPU, RAM, GPU, DISK).
+// Shared by DrawHardwareMonitorDashboard and the DISK drive-switch arrow's hit
+// test in OverlayWndProc. Content space, unscaled: both callers of the
+// dashboard draw it at scale 1.
+namespace HardwareLayout {
+    constexpr float kPadX = 24.0f;
+    constexpr float kGridTop = 38.0f;
+    // The band the old 2 x 3 grid used (3 rows of 38 + 2 gaps of 6).
+    constexpr float kGridBand = 38.0f * 3.0f + 6.0f * 2.0f;
+    // One gap for both axes so the gutters between tiles read as equal.
+    constexpr float kTileGap = 8.0f;
+    constexpr float kRowHeight = (kGridBand - kTileGap) * 0.5f;
+    constexpr int kDiskTile = 3;
+
+    // Icon well: a tinted disc holding the glyph, inset equally from the
+    // tile's left, top and bottom edges.
+    constexpr float kWellSize = 34.0f;
+    constexpr float kWellInset = (kRowHeight - kWellSize) * 0.5f;
+    constexpr float kTextGap = 9.0f;  // well -> text column
+
+    // Text column bands: label / value / load bar, centred as one block.
+    constexpr float kLabelHeight = 14.0f;
+    constexpr float kValueHeight = 18.0f;
+    constexpr float kBarGap = 4.0f;
+    constexpr float kBarHeight = 3.0f;
+    constexpr float kBlockTop = (kRowHeight - (kLabelHeight + kValueHeight + kBarGap + kBarHeight)) * 0.5f;
+    // The bar stops this far from the tile's right edge so its end clears
+    // the rounded corner instead of crowding it. Text may run further out.
+    constexpr float kBarRightInset = 22.0f;
+
+    // Drive switch arrow on the DISK tile: a chevron centred vertically in
+    // the tile, its right edge lined up with the end of the load bar. The
+    // hit target is generous: the whole right-hand strip of the tile, from
+    // kArrowHitLeftReach left of the chevron out to the tile edge, full height.
+    constexpr float kArrowHitLeftReach = 22.0f;
+    constexpr float kArrowHalfHeight = 5.0f;
+    constexpr float kArrowHalfWidth = 2.5f;
+
+    inline float ColumnWidth(float width) {
+        return (width - kPadX * 2.0f - kTileGap) * 0.5f;
+    }
+
+    inline void TileRect(int index, float width, float& left, float& top, float& right, float& bottom) {
+        const float colW = ColumnWidth(width);
+        left = kPadX + static_cast<float>(index % 2) * (colW + kTileGap);
+        top = kGridTop + static_cast<float>(index / 2) * (kRowHeight + kTileGap);
+        right = left + colW;
+        bottom = top + kRowHeight;
+    }
+
+    // Centre of the drive switch arrow, relative to the content rect.
+    inline void DiskArrowCenter(float width, float& cx, float& cy) {
+        float left, top, right, bottom;
+        TileRect(kDiskTile, width, left, top, right, bottom);
+        cx = right - kBarRightInset - kArrowHalfWidth;
+        cy = (top + bottom) * 0.5f;
+    }
+
+    // True when (x, y), relative to the content rect, is on the arrow's target.
+    inline bool DiskArrowHit(float width, float x, float y) {
+        float left, top, right, bottom;
+        TileRect(kDiskTile, width, left, top, right, bottom);
+        float cx, cy;
+        DiskArrowCenter(width, cx, cy);
+        return x >= cx - kArrowHitLeftReach && x <= right && y >= top && y <= bottom;
+    }
+}
+
 // Layout for the collapsed idle strip (the clock, and optionally a weather
 // reading beside it).
 //
@@ -1252,7 +1320,12 @@ struct SystemSnapshot {
     int memoryPercent = 0;
     float memoryUsedGB = 0.0f;
     float memoryTotalGB = 0.0f;
-    int diskFreePercent = 0;
+    int diskFreePercent = 0;         // always C:, used by the game overlay
+    // The Hardware Monitor's DISK card, which can be switched between fixed
+    // drives with its arrow (see CycleHardwareDisk).
+    wchar_t hwDiskLetter = L'C';
+    int hwDiskFreePercent = 0;
+    int fixedDriveCount = 1;
     int renderFps = 0;
     int gpuPercent = -1;
     float netUpMbps = 0.0f;
@@ -1436,6 +1509,8 @@ std::atomic<float> g_scrubInsetLeft = MediaLayout::kScrubInsetLeft;
 std::atomic<float> g_scrubInsetRight = MediaLayout::kScrubInsetRight;
 std::atomic<int> g_hoveredFileTrayRow = -1;  // row index under the cursor on the File Tray card
 std::atomic<int> g_hoveredWeatherChip = -1;  // 0 wind, 1 feels like, 2 humidity on the Date & Weather card
+std::atomic<bool> g_hoveredHwDiskArrow = false;  // cursor over the DISK card's drive switch arrow
+std::atomic<int> g_hwDiskLetter{L'C'};  // drive shown on the Hardware Monitor's DISK card
 std::atomic<bool> g_scrubbing = false;           // true while press-dragging the media timeline scrubber
 std::atomic<float> g_scrubDragFraction = 0.0f;   // live 0..1 drag position while g_scrubbing is true
 std::atomic<double> g_lastLiveSeekTime = 0.0;    // throttle gate for live seeks while dragging
@@ -1892,6 +1967,15 @@ int WeatherChipAtContentPoint(const MediaContentPoint& pt) {
         }
     }
     return -1;
+}
+
+// True when the point is over the Hardware Monitor DISK card's drive switch
+// arrow. The arrow is only drawn with more than one fixed drive.
+bool HardwareDiskArrowAtContentPoint(const MediaContentPoint& pt, int fixedDriveCount) {
+    if (!pt.valid || fixedDriveCount < 2 || pt.height <= MediaLayout::kExpandedMinHeight) {
+        return false;
+    }
+    return HardwareLayout::DiskArrowHit(pt.width, pt.x, pt.y);
 }
 
 // True when the point is over the expanded layout's album art.
@@ -6810,6 +6894,78 @@ static void GetNetworkUsage(float& outUpMbps, float& outDownMbps) {
     outDownMbps = static_cast<float>(getSum(g_netDownCounter) * 8.0 / 1000000.0);
 }
 
+// Letters of the local fixed drives (no USB sticks, optical or network
+// drives), in alphabetical order.
+static std::vector<wchar_t> FixedDriveLetters() {
+    std::vector<wchar_t> letters;
+    const DWORD mask = GetLogicalDrives();
+    for (int i = 0; i < 26; ++i) {
+        if (!(mask & (1u << i))) continue;
+        const wchar_t root[4] = {static_cast<wchar_t>(L'A' + i), L':', L'\\', L'\0'};
+        if (GetDriveTypeW(root) == DRIVE_FIXED) {
+            letters.push_back(root[0]);
+        }
+    }
+    return letters;
+}
+
+// Free space on `letter` as a 0-100 percentage, or -1 when it can't be read.
+static int DriveFreePercent(wchar_t letter) {
+    const wchar_t root[4] = {letter, L':', L'\\', L'\0'};
+    ULARGE_INTEGER freeBytesAvailable = {};
+    ULARGE_INTEGER totalBytes = {};
+    ULARGE_INTEGER totalFreeBytes = {};
+    if (GetDiskFreeSpaceExW(root, &freeBytesAvailable, &totalBytes, &totalFreeBytes) &&
+        totalBytes.QuadPart > 0) {
+        return ClampInt(static_cast<int>(totalFreeBytes.QuadPart * 100 / totalBytes.QuadPart), 0, 100);
+    }
+    return -1;
+}
+
+// Fills the Hardware Monitor DISK card's fields for the selected drive. Falls
+// back to the first fixed drive if the selected one has disappeared.
+static void SampleHardwareDisk(SystemSnapshot& next) {
+    const std::vector<wchar_t> letters = FixedDriveLetters();
+    wchar_t letter = static_cast<wchar_t>(g_hwDiskLetter.load(std::memory_order_relaxed));
+    if (!letters.empty() && std::find(letters.begin(), letters.end(), letter) == letters.end()) {
+        letter = letters.front();
+        g_hwDiskLetter.store(letter, std::memory_order_relaxed);
+    }
+    next.fixedDriveCount = std::max(1, static_cast<int>(letters.size()));
+    const int freePercent = DriveFreePercent(letter);
+    if (freePercent >= 0) {
+        next.hwDiskLetter = letter;
+        next.hwDiskFreePercent = freePercent;
+    }
+}
+
+// The DISK card's arrow: moves to the next fixed drive (C: -> D: -> ... -> C:)
+// and refreshes the card at once rather than on the next 1s system poll. The
+// choice is remembered across restarts.
+void CycleHardwareDisk() {
+    const std::vector<wchar_t> letters = FixedDriveLetters();
+    if (letters.size() < 2) return;
+    const wchar_t current = static_cast<wchar_t>(g_hwDiskLetter.load(std::memory_order_relaxed));
+    auto it = std::find(letters.begin(), letters.end(), current);
+    const wchar_t next = (it == letters.end() || it + 1 == letters.end()) ? letters.front() : *(it + 1);
+    g_hwDiskLetter.store(next, std::memory_order_relaxed);
+    Wh_SetIntValue(L"HardwareDiskLetter", static_cast<int>(next));
+
+    SystemSnapshot snapshot;
+    {
+        std::lock_guard lock(g_stateMutex);
+        snapshot = g_state.system;
+    }
+    SampleHardwareDisk(snapshot);
+    {
+        std::lock_guard lock(g_stateMutex);
+        g_state.system.hwDiskLetter = snapshot.hwDiskLetter;
+        g_state.system.hwDiskFreePercent = snapshot.hwDiskFreePercent;
+        g_state.system.fixedDriveCount = snapshot.fixedDriveCount;
+    }
+    g_layoutDirty = true;
+}
+
 void UpdateSystemSnapshot(bool includeGpuStats, bool includeNetStats) {
     SystemSnapshot next;
     {
@@ -6846,6 +7002,7 @@ void UpdateSystemSnapshot(bool includeGpuStats, bool includeNetStats) {
         next.diskFreePercent = ClampInt(
             static_cast<int>(totalFreeBytes.QuadPart * 100 / totalBytes.QuadPart), 0, 100);
     }
+    SampleHardwareDisk(next);
 
     HWND foreground = GetForegroundWindow();
     if (foreground && foreground != g_hwnd) {
@@ -10800,7 +10957,7 @@ class Renderer {
     void DrawHardwareMonitorDashboard(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, float scale) {
         (void)settings;
 
-        const float padX = 24.0f * scale;
+        const float padX = HardwareLayout::kPadX * scale;
 
         // Header, left aligned to match the File Tray and weather dashboards.
         textBrush_->SetOpacity(0.96f);
@@ -10814,18 +10971,21 @@ class Renderer {
             boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         }
 
-        wchar_t cpuBuf[32], ramBuf[40], gpuBuf[32], upBuf[32], downBuf[32], diskBuf[32];
+        wchar_t cpuBuf[32], ramBuf[16], ramDetail[40], gpuBuf[32], diskBuf[32], diskLabel[16];
         swprintf_s(cpuBuf, L"%d%%", state.system.cpuPercent);
-        swprintf_s(ramBuf, L"%.1f / %.1f GB", state.system.memoryUsedGB, state.system.memoryTotalGB);
+        swprintf_s(ramBuf, L"%d%%", state.system.memoryPercent);
+        // Total rounded to whole GB (31.9 -> 32) so "used/total" fits beside
+        // the percentage.
+        swprintf_s(ramDetail, L"%.1f/%.0f GB", state.system.memoryUsedGB, state.system.memoryTotalGB);
         if (state.system.gpuPercent >= 0) {
             swprintf_s(gpuBuf, L"%d%%", state.system.gpuPercent);
         } else {
             wcscpy_s(gpuBuf, L"--");
         }
-        swprintf_s(upBuf, L"%.1f Mbps", state.system.netUpMbps);
-        swprintf_s(downBuf, L"%.1f Mbps", state.system.netDownMbps);
-        const int diskUsed = 100 - state.system.diskFreePercent;
+        const int diskUsed = 100 - state.system.hwDiskFreePercent;
         swprintf_s(diskBuf, L"%d%%", diskUsed);
+        swprintf_s(diskLabel, L"DISK %lc:", state.system.hwDiskLetter);
+        const bool showDiskArrow = state.system.fixedDriveCount > 1;
 
         const float ramFraction = (state.system.memoryTotalGB > 0.01f)
             ? Clamp(state.system.memoryUsedGB / state.system.memoryTotalGB, 0.0f, 1.0f)
@@ -10836,88 +10996,141 @@ class Renderer {
             const wchar_t* label;
             const wchar_t* value;
             float fraction;  // negative means "no meaningful 0-100 scale"
+            const wchar_t* detail;  // optional muted text after the value
         };
 
-        // Network throughput has no natural ceiling, so those two cards get no
-        // load bar rather than a bar against an invented maximum.
-        const HwMetric metrics[6] = {
-            {3, L"CPU",      cpuBuf,  Clamp(state.system.cpuPercent / 100.0f, 0.0f, 1.0f)},
-            {6, L"NET UP",   upBuf,   -1.0f},
-            {4, L"RAM",      ramBuf,  ramFraction},
-            {7, L"NET DOWN", downBuf, -1.0f},
-            {5, L"GPU",      gpuBuf,  state.system.gpuPercent >= 0
-                                          ? Clamp(state.system.gpuPercent / 100.0f, 0.0f, 1.0f)
-                                          : -1.0f},
-            {8, L"DISK",     diskBuf, Clamp(diskUsed / 100.0f, 0.0f, 1.0f)},
+        constexpr int kMetricCount = 4;
+        const HwMetric metrics[kMetricCount] = {
+            {3, L"CPU",     cpuBuf,  Clamp(state.system.cpuPercent / 100.0f, 0.0f, 1.0f), nullptr},
+            {4, L"RAM",     ramBuf,  ramFraction, ramDetail},
+            {5, L"GPU",     gpuBuf,  state.system.gpuPercent >= 0
+                                         ? Clamp(state.system.gpuPercent / 100.0f, 0.0f, 1.0f)
+                                         : -1.0f, nullptr},
+            {8, diskLabel,  diskBuf, Clamp(diskUsed / 100.0f, 0.0f, 1.0f), nullptr},
         };
 
-        // 2 x 3 grid of cards. Cards give the grid its structure, so the old
-        // full-height centre divider is gone.
-        const float colGap = 9.0f * scale;
-        const float colW = (rect.right - rect.left - padX * 2.0f - colGap) * 0.5f;
-        const float rowH = 38.0f * scale;
-        const float rowGap = 6.0f * scale;
-        const float gridTop = rect.top + 38.0f * scale;
+        // 2 x 2 grid of tiles (see HardwareLayout, shared with the DISK arrow's
+        // hit test). Tile corners follow the island's own shape
+        // (InsetCardRadius), so with the pill shape the tiles read as small
+        // islands, and with notch / Windows 11 shapes they stay squarer.
+        const float rowH = HardwareLayout::kRowHeight * scale;
+        const float tileRadius = std::min(InsetCardRadius(rect, scale), rowH * 0.5f);
 
-        for (int i = 0; i < 6; ++i) {
+        // The icon well's curve runs concentric with the tile corner.
+        const float wellD = HardwareLayout::kWellSize * scale;
+        const float wellInset = HardwareLayout::kWellInset * scale;
+        const float wellRadius = std::min(wellD * 0.5f, std::max(tileRadius - wellInset, 4.0f * scale));
+
+        const float labelH = HardwareLayout::kLabelHeight * scale;
+        const float valueH = HardwareLayout::kValueHeight * scale;
+        const float barGap = HardwareLayout::kBarGap * scale;
+        const float barH = HardwareLayout::kBarHeight * scale;
+        const float width = (rect.right - rect.left) / scale;
+
+        for (int i = 0; i < kMetricCount; ++i) {
             const HwMetric& m = metrics[i];
-            const int col = i % 2;
-            const int row = i / 2;
 
-            const float cardLeft = rect.left + padX + static_cast<float>(col) * (colW + colGap);
-            const float cardTop = gridTop + static_cast<float>(row) * (rowH + rowGap);
-            const D2D1_RECT_F card = D2D1::RectF(cardLeft, cardTop, cardLeft + colW, cardTop + rowH);
-
-            DrawCard(card, 9.0f * scale);
+            float tl = 0.0f, tt = 0.0f, tr = 0.0f, tb = 0.0f;
+            HardwareLayout::TileRect(i, width, tl, tt, tr, tb);
+            const D2D1_RECT_F tile = D2D1::RectF(rect.left + tl * scale, rect.top + tt * scale,
+                                                 rect.left + tr * scale, rect.top + tb * scale);
+            DrawCard(tile, tileRadius);
 
             const bool hasBar = m.fraction >= 0.0f;
             const D2D1_COLOR_F tint = hasBar ? LoadStateColor(m.fraction) : material_.accent;
 
+            const D2D1_RECT_F well = D2D1::RectF(tile.left + wellInset, tile.top + wellInset,
+                                                 tile.left + wellInset + wellD, tile.top + wellInset + wellD);
+            ComPtr<ID2D1SolidColorBrush> wellBrush;
+            if (SUCCEEDED(target_->CreateSolidColorBrush(WithAlpha(tint, 0.18f * settingsOpacity_), &wellBrush)) && wellBrush) {
+                target_->FillRoundedRectangle(D2D1::RoundedRect(well, wellRadius, wellRadius), wellBrush.Get());
+            }
             ComPtr<ID2D1SolidColorBrush> glyphBrush;
-            target_->CreateSolidColorBrush(WithAlpha(tint, 0.85f * settingsOpacity_), &glyphBrush);
+            target_->CreateSolidColorBrush(WithAlpha(tint, 0.95f * settingsOpacity_), &glyphBrush);
             if (glyphBrush) {
-                DrawMetricGlyph(D2D1::Point2F(card.left + 16.0f * scale, card.top + 15.0f * scale),
-                                15.0f * scale, m.glyph, glyphBrush.Get());
+                DrawMetricGlyph(D2D1::Point2F((well.left + well.right) * 0.5f, (well.top + well.bottom) * 0.5f),
+                                21.0f * scale, m.glyph, glyphBrush.Get());
             }
 
-            const float textLeft = card.left + 30.0f * scale;
-            const float textRight = card.right - 9.0f * scale;
+            const bool isDisk = (i == HardwareLayout::kDiskTile);
+            const float textLeft = well.right + HardwareLayout::kTextGap * scale;
+            const float barRight = tile.right - HardwareLayout::kBarRightInset * scale;
+            // Text may run close to the edge, except on the DISK tile, where
+            // it stops short of the drive switch arrow.
+            const float textRight = (isDisk && showDiskArrow) ? barRight - 14.0f * scale
+                                                              : tile.right - wellInset;
+            const float blockTop = hasBar
+                ? tile.top + HardwareLayout::kBlockTop * scale
+                : tile.top + (rowH - labelH - valueH) * 0.5f;
 
             // Label sits above the value rather than sharing a line with it.
             // A single "Label: value" line collides once localized -- German
             // "Luftfeuchte" or Russian "Влажность" leave no room for the number.
-            // The three bands (label / value / bar) are kept adjacent but
-            // non-overlapping so nothing clips into its neighbour.
-            if (smallTextFormat_) {
-                smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                mutedBrush_->SetOpacity(0.60f);
-                target_->DrawTextW(m.label, static_cast<UINT32>(wcslen(m.label)), smallTextFormat_.Get(),
-                                   D2D1::RectF(textLeft, card.top + 2.0f * scale,
-                                               textRight, card.top + 15.0f * scale),
-                                   mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            // Bold and in the text colour at reduced opacity: clearly legible,
+            // yet a step below the full-strength value.
+            if (boldTextFormat_) {
+                boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                boldTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                textBrush_->SetOpacity(0.62f);
+                target_->DrawTextW(m.label, static_cast<UINT32>(wcslen(m.label)), boldTextFormat_.Get(),
+                                   D2D1::RectF(textLeft, blockTop, textRight, blockTop + labelH),
+                                   textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                boldTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+                boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+
+            // Drive switch arrow: one chevron, cycling through the fixed
+            // drives. Hover just brightens it; no backdrop.
+            if (isDisk && showDiskArrow) {
+                float acx = 0.0f, acy = 0.0f;
+                HardwareLayout::DiskArrowCenter(width, acx, acy);
+                const D2D1_POINT_2F ac = D2D1::Point2F(rect.left + acx * scale, rect.top + acy * scale);
+                const bool hovered = g_hoveredHwDiskArrow.load(std::memory_order_relaxed);
+                ComPtr<ID2D1SolidColorBrush> icon;
+                target_->CreateSolidColorBrush(WithAlpha(material_.textPrimary, hovered ? 0.92f : 0.55f), &icon);
+                if (icon) {
+                    const float hw = HardwareLayout::kArrowHalfWidth * scale;
+                    const float hh = HardwareLayout::kArrowHalfHeight * scale;
+                    const float stroke = 1.8f * scale;
+                    target_->DrawLine(D2D1::Point2F(ac.x - hw, ac.y - hh), D2D1::Point2F(ac.x + hw, ac.y), icon.Get(), stroke);
+                    target_->DrawLine(D2D1::Point2F(ac.x - hw, ac.y + hh), D2D1::Point2F(ac.x + hw, ac.y), icon.Get(), stroke);
+                }
             }
 
             if (textFormat_) {
                 textFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
                 textFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                textBrush_->SetOpacity(0.95f);
-                // Without a bar the value takes the band the bar would have
-                // used, so the two card shapes stay optically balanced.
-                const float valueBottom = hasBar ? card.top + 30.0f * scale : card.bottom - 4.0f * scale;
+                textBrush_->SetOpacity(0.97f);
                 target_->DrawTextW(m.value, static_cast<UINT32>(wcslen(m.value)), textFormat_.Get(),
-                                   D2D1::RectF(textLeft, card.top + 15.0f * scale, textRight, valueBottom),
+                                   D2D1::RectF(textLeft, blockTop + labelH, textRight, blockTop + labelH + valueH),
                                    textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
                 textFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+
+                // Muted secondary reading right after the value (RAM's used /
+                // total), in the small face, nudged down 1px so the two faces
+                // roughly share a baseline.
+                if (m.detail && smallTextFormat_) {
+                    const float detailLeft = textLeft + MeasureTextWidth(m.value, textFormat_.Get()) + 6.0f * scale;
+                    if (detailLeft < textRight) {
+                        smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                        smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                        mutedBrush_->SetOpacity(0.85f);
+                        target_->DrawTextW(m.detail, static_cast<UINT32>(wcslen(m.detail)), smallTextFormat_.Get(),
+                                           D2D1::RectF(detailLeft, blockTop + labelH + 1.0f * scale,
+                                                       textRight, blockTop + labelH + valueH + 1.0f * scale),
+                                           mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                        smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+                    }
+                }
             }
 
             if (hasBar) {
-                const D2D1_RECT_F track = D2D1::RectF(textLeft, card.bottom - 6.0f * scale,
-                                                      textRight, card.bottom - 3.5f * scale);
+                const float barTop = blockTop + labelH + valueH + barGap;
+                const D2D1_RECT_F track = D2D1::RectF(textLeft, barTop, barRight, barTop + barH);
+                const float barR = barH * 0.5f;
                 ComPtr<ID2D1SolidColorBrush> trackBrush;
                 if (SUCCEEDED(target_->CreateSolidColorBrush(material_.raisedStrong, &trackBrush)) && trackBrush) {
-                    target_->FillRoundedRectangle(D2D1::RoundedRect(track, 1.25f * scale, 1.25f * scale), trackBrush.Get());
+                    target_->FillRoundedRectangle(D2D1::RoundedRect(track, barR, barR), trackBrush.Get());
                 }
 
                 const float span = (track.right - track.left) * m.fraction;
@@ -10926,7 +11139,7 @@ class Renderer {
                     if (SUCCEEDED(target_->CreateSolidColorBrush(WithAlpha(tint, 0.95f), &fillBrush)) && fillBrush) {
                         target_->FillRoundedRectangle(
                             D2D1::RoundedRect(D2D1::RectF(track.left, track.top, track.left + span, track.bottom),
-                                              1.25f * scale, 1.25f * scale),
+                                              barR, barR),
                             fillBrush.Get());
                     }
                 }
@@ -14614,6 +14827,20 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_hoveredWeatherChip.exchange(hoveredChip) != hoveredChip) {
                 g_layoutDirty = true;
             }
+
+            // Hardware Monitor DISK card's drive switch arrow.
+            bool hoveredDiskArrow = false;
+            if (currentTab == HardwareMonitorTabIndex(g_settings)) {
+                int driveCount = 1;
+                {
+                    std::lock_guard lock(g_stateMutex);
+                    driveCount = g_state.system.fixedDriveCount;
+                }
+                hoveredDiskArrow = HardwareDiskArrowAtContentPoint(MediaContentFromClient(xPos, yPos), driveCount);
+            }
+            if (g_hoveredHwDiskArrow.exchange(hoveredDiskArrow) != hoveredDiskArrow) {
+                g_layoutDirty = true;
+            }
             return 0;
         }
 
@@ -14622,6 +14849,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_layoutDirty = true;
             }
             if (g_hoveredWeatherChip.exchange(-1) != -1) {
+                g_layoutDirty = true;
+            }
+            if (g_hoveredHwDiskArrow.exchange(false)) {
                 g_layoutDirty = true;
             }
             return 0;
@@ -14721,6 +14951,19 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 const int currentTab = NormalizedTabIndex(g_settings);
 
                 const MediaContentPoint cp = MediaContentFromClient(xPos, yPos);
+
+                // Hardware Monitor: the DISK card's arrow switches to the next drive.
+                if (currentTab == HardwareMonitorTabIndex(g_settings)) {
+                    int driveCount = 1;
+                    {
+                        std::lock_guard lock(g_stateMutex);
+                        driveCount = g_state.system.fixedDriveCount;
+                    }
+                    if (HardwareDiskArrowAtContentPoint(cp, driveCount)) {
+                        CycleHardwareDisk();
+                        return 0;
+                    }
+                }
 
                 // File Tray: clicking a row opens that file with its default app.
                 if (g_settings.fileTrayModule && currentTab == FileTrayTabIndex(g_settings)) {
@@ -15359,6 +15602,10 @@ DWORD WINAPI RenderThreadProc(void*) {
             g_hoveredWeatherChip = -1;
             needsRender = true;
         }
+        if (!hover && g_hoveredHwDiskArrow.load()) {
+            g_hoveredHwDiskArrow = false;
+            needsRender = true;
+        }
         // Fixes windhawk-mods#4738: active playback used to count as a continuous
         // event, so the island stayed visible for as long as anything was playing
         // and kept resetting the auto-hide timer. Only the 5s window after a
@@ -15487,7 +15734,7 @@ DWORD WINAPI RenderThreadProc(void*) {
 
         if (now >= nextSystemPoll) {
             const bool needGpuStats = gameOverlayVisible || hwMonitorVisible;
-            const bool needNetStats = hwMonitorVisible;  // net is only ever drawn in the HW dashboard
+            const bool needNetStats = false;  // no surface draws network throughput any more
 
             UpdateSystemSnapshot(needGpuStats, needNetStats);
             nextSystemPoll = now + 1.0;
@@ -15837,6 +16084,8 @@ DWORD WINAPI RenderThreadProc(void*) {
         static int prevCpu = -1;
         static int prevRam = -1;
         static int prevDisk = -1;
+        static int prevHwDisk = -1;
+        static wchar_t prevHwDiskLetter = 0;
         static int prevVol = -1;
         static bool prevMuted = false;
         static int prevBat = -1;
@@ -15853,7 +16102,9 @@ DWORD WINAPI RenderThreadProc(void*) {
         const bool systemMetricsChanged =
             systemMetricsVisible && (snapshot.system.cpuPercent != prevCpu ||
                                      snapshot.system.memoryPercent != prevRam ||
-                                     snapshot.system.diskFreePercent != prevDisk);
+                                     snapshot.system.diskFreePercent != prevDisk ||
+                                     snapshot.system.hwDiskFreePercent != prevHwDisk ||
+                                     snapshot.system.hwDiskLetter != prevHwDiskLetter);
 
         if (snapshot.media.artGeneration != prevArtGen ||
             snapshot.media.sourceIconGeneration != prevSrcIconGen ||
@@ -15881,6 +16132,8 @@ DWORD WINAPI RenderThreadProc(void*) {
             prevCpu = snapshot.system.cpuPercent;
             prevRam = snapshot.system.memoryPercent;
             prevDisk = snapshot.system.diskFreePercent;
+            prevHwDisk = snapshot.system.hwDiskFreePercent;
+            prevHwDiskLetter = snapshot.system.hwDiskLetter;
             prevVol = snapshot.system.volumePercent;
             prevMuted = snapshot.system.volumeMuted;
             prevBat = snapshot.battery.percent;
@@ -16115,6 +16368,10 @@ void StopThreads() {
 BOOL WhTool_ModInit() {
     LoadSettings();
     g_lyricsEnabled = Wh_GetIntValue(L"LyricsEnabled", 1) != 0;
+    {
+        const int diskLetter = Wh_GetIntValue(L"HardwareDiskLetter", L'C');
+        g_hwDiskLetter = (diskLetter >= L'A' && diskLetter <= L'Z') ? diskLetter : L'C';
+    }
     g_islandMinimized = Wh_GetIntValue(L"IslandMinimized", 0) != 0;
 
     if (!StartThreads()) {

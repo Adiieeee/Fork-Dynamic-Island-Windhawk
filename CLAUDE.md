@@ -16,7 +16,7 @@ A single-file [Windhawk](https://windhawk.net) mod, `mod.wh.cpp` (~13k lines): a
 
 1. `==WindhawkMod==` header (id, version, `@include windhawk.exe`, compiler options), then the Markdown readme (`==WindhawkModReadme==`, includes the Credits list that contributors are asked to update) and the YAML settings schema (`==WindhawkModSettings==`). **Adding a setting means editing three places:** the YAML schema, the `Settings` struct (~line 897), and `LoadSettings()` (~line 1985).
 2. Includes, with `__has_include` guards that set `DYNAMIC_ISLAND_HAS_USER_NOTIFICATION_LISTENER` / `DYNAMIC_ISLAND_HAS_BLUETOOTH_WATCHER`. Features depending on newer WinRT headers compile to stubs when the SDK lacks them, so keep both `#if` branches working.
-3. Everything lives in one anonymous `namespace`: layout namespaces (`MediaLayout`, `FileTrayLayout`, `IdleStripLayout`, `GameOverlayLayout`), enums/snapshot structs, `Settings`, `SharedState`, `SpringValue`, localization, helpers, worker threads, the `Renderer` class (~6685–10970), input hooks, `OverlayWndProc`, `RenderThreadProc`.
+3. Everything lives in one anonymous `namespace`: layout namespaces (`MediaLayout`, `FileTrayLayout`, `WeatherLayout`, `HardwareLayout`, `IdleStripLayout`, `GameOverlayLayout`), enums/snapshot structs, `Settings`, `SharedState`, `SpringValue`, localization, helpers, worker threads, the `Renderer` class (~6685–10970), input hooks, `OverlayWndProc`, `RenderThreadProc`.
 4. Tail: `WhTool_ModInit/Uninit/SettingsChanged` hold the real mod logic; `Wh_ModInit`, `Wh_ModAfterInit`, `Wh_ModSettingsChanged`, `Wh_ModUninit` are the Windhawk entry points.
 
 ## Architecture
