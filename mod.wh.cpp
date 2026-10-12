@@ -31,7 +31,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 | **Media Player** | Shows live album art, track details, audio waveforms, and full playback controls. Synced lyrics (from [LRCLIB](https://lrclib.net)) scroll along in the collapsed pill; toggle them with the lyrics button next to the playback controls. | ![Media](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/media-v2.png) |
 | **Calendar** | A monthly grid that always fits its rows, with today marked in the accent colour. | ![Calendar](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/calendar.png) |
 | **Weather** | Real-time weather stats powered by wttr.in, including wind speed, humidity, and "feels like" temperature. Hover a chip for a short explanation of what it means. | ![Weather](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/weather-v2.png) |
-| **Hardware Monitor** | CPU, RAM, GPU and disk usage (the arrow on the disk card switches between drives), with load bars that turn amber past 75% and red past 90%. | ![Hardware Monitor](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/hardware-monitor.png) |
+| **Hardware Monitor** | CPU (with its current clock), RAM, GPU (with its temperature, where the GPU reports one) and disk usage (the arrow on the disk card switches between drives), with load bars that turn amber past 75% and red past 90%. | ![Hardware Monitor](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/hardware-monitor.png) |
 | **Game Overlay** | Real-time FPS, CPU, GPU, RAM and disk, sized to whichever metrics you enable. | ![Gamebar](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/gamebar-v2.png) |
 | **Idle View** | A minimal dashboard with your battery status, digital clock, and sleek pagination dots. | ![Idle](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/idle-v2.png) |
 | **Camera Privacy** | Shows a green dot when an app is actively using your webcam. | ![Camera](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/camera-detected-v2.png) |
@@ -1330,6 +1330,9 @@ struct SystemSnapshot {
     int gpuPercent = -1;
     float netUpMbps = 0.0f;
     float netDownMbps = 0.0f;
+    // Hardware Monitor extras, sampled only while that tab is on screen.
+    float cpuGHz = 0.0f;   // current effective clock; 0 = unavailable
+    int gpuTempC = -1;     // hottest GPU that reports one; -1 = unavailable
     bool charging = false;
     bool micActive = false;      // orange dot: microphone in use
     bool cameraActive = false;   // green dot: camera in use
@@ -6845,6 +6848,174 @@ static int GetGpuUsage() {
     return 0;
 }
 
+// ── CPU clock (Hardware Monitor) ─────────────────────────────────────────────
+// The same figure Task Manager shows as "Speed": the nominal clock times the
+// current performance percentage, which goes above 100% under turbo boost.
+// "% Processor Performance" is a rate counter, so the first sample after
+// opening the query only primes it and reads as unavailable.
+static PDH_HQUERY g_cpuFreqQuery = NULL;
+static PDH_HCOUNTER g_cpuBaseMhzCounter = NULL;
+static PDH_HCOUNTER g_cpuPerfCounter = NULL;
+
+static float GetCpuClockGHz() {
+    if (g_cpuFreqQuery == NULL) {
+        if (PdhOpenQueryW(NULL, 0, &g_cpuFreqQuery) != ERROR_SUCCESS) {
+            g_cpuFreqQuery = NULL;
+            return 0.0f;
+        }
+        PdhAddEnglishCounterW(g_cpuFreqQuery, L"\\Processor Information(_Total)\\Processor Frequency", 0,
+                              &g_cpuBaseMhzCounter);
+        PdhAddEnglishCounterW(g_cpuFreqQuery, L"\\Processor Information(_Total)\\% Processor Performance", 0,
+                              &g_cpuPerfCounter);
+        PdhCollectQueryData(g_cpuFreqQuery);
+        return 0.0f;
+    }
+    if (!g_cpuBaseMhzCounter || !g_cpuPerfCounter ||
+        PdhCollectQueryData(g_cpuFreqQuery) != ERROR_SUCCESS) {
+        return 0.0f;
+    }
+
+    PDH_FMT_COUNTERVALUE base = {};
+    PDH_FMT_COUNTERVALUE perf = {};
+    if (PdhGetFormattedCounterValue(g_cpuBaseMhzCounter, PDH_FMT_DOUBLE, NULL, &base) != ERROR_SUCCESS ||
+        PdhGetFormattedCounterValue(g_cpuPerfCounter, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, NULL, &perf) != ERROR_SUCCESS ||
+        base.doubleValue <= 0.0 || perf.doubleValue <= 0.0) {
+        return 0.0f;
+    }
+    return static_cast<float>(base.doubleValue * perf.doubleValue / 100.0 / 1000.0);
+}
+
+// ── GPU temperature (Hardware Monitor) ───────────────────────────────────────
+// Read through D3DKMT's adapter perf data, the vendor-neutral source Task
+// Manager uses for its GPU temperature. One cheap kernel query per adapter, no
+// admin rights or vendor SDK. Usually only dedicated GPUs report a value;
+// integrated ones return 0 and are skipped. The SDK headers are not part of
+// the Windhawk toolchain, so the few structures needed are declared here
+// (layouts from d3dkmthk.h) and the entry points are resolved from gdi32.
+namespace Kmt {
+    typedef UINT D3DKMT_HANDLE;
+    struct ADAPTERINFO {
+        D3DKMT_HANDLE hAdapter;
+        LUID AdapterLuid;
+        ULONG NumOfSources;
+        BOOL bPrecisePresentRegionsPreferred;
+    };
+    struct ENUMADAPTERS2 {
+        ULONG NumAdapters;
+        ADAPTERINFO* pAdapters;
+    };
+    struct QUERYADAPTERINFO {
+        D3DKMT_HANDLE hAdapter;
+        int Type;  // KMTQUERYADAPTERINFOTYPE
+        void* pPrivateDriverData;
+        UINT PrivateDriverDataSize;
+    };
+    struct ADAPTER_PERFDATA {
+        UINT32 PhysicalAdapterIndex;
+        ULONGLONG MemoryFrequency;
+        ULONGLONG MaxMemoryFrequency;
+        ULONGLONG MaxMemoryFrequencyOC;
+        ULONGLONG MemoryBandwidth;
+        ULONGLONG PCIEBandwidth;
+        ULONG FanRPM;
+        ULONG Power;
+        ULONG Temperature;  // deci-Celsius
+        UCHAR PowerStateOverride;
+    };
+    struct CLOSEADAPTER {
+        D3DKMT_HANDLE hAdapter;
+    };
+    constexpr int kQueryAdapterPerfData = 62;  // KMTQAITYPE_ADAPTERPERFDATA
+
+    using EnumAdapters2Fn = LONG(APIENTRY*)(ENUMADAPTERS2*);
+    using QueryAdapterInfoFn = LONG(APIENTRY*)(const QUERYADAPTERINFO*);
+    using CloseAdapterFn = LONG(APIENTRY*)(const CLOSEADAPTER*);
+}
+
+static Kmt::QueryAdapterInfoFn g_kmtQueryAdapterInfo = nullptr;
+static Kmt::CloseAdapterFn g_kmtCloseAdapter = nullptr;
+static std::vector<Kmt::D3DKMT_HANDLE> g_kmtAdapters;
+static bool g_kmtInitTried = false;
+static ULONGLONG g_kmtRetryAfterTick = 0;  // throttles re-opening after total failure
+
+// Opens the adapter handles once and keeps them; they are only re-opened if a
+// query starts failing (driver update, GPU removed).
+static void OpenKmtAdapters() {
+    g_kmtInitTried = true;
+    HMODULE gdi = GetModuleHandleW(L"gdi32.dll");
+    if (!gdi) gdi = LoadLibraryW(L"gdi32.dll");
+    if (!gdi) return;
+    auto enumAdapters = reinterpret_cast<Kmt::EnumAdapters2Fn>(GetProcAddress(gdi, "D3DKMTEnumAdapters2"));
+    g_kmtQueryAdapterInfo = reinterpret_cast<Kmt::QueryAdapterInfoFn>(GetProcAddress(gdi, "D3DKMTQueryAdapterInfo"));
+    g_kmtCloseAdapter = reinterpret_cast<Kmt::CloseAdapterFn>(GetProcAddress(gdi, "D3DKMTCloseAdapter"));
+    if (!enumAdapters || !g_kmtQueryAdapterInfo) return;
+
+    Kmt::ENUMADAPTERS2 en = {};
+    if (enumAdapters(&en) != 0 || en.NumAdapters == 0) return;  // first call: count only
+    std::vector<Kmt::ADAPTERINFO> infos(en.NumAdapters);
+    en.pAdapters = infos.data();
+    if (enumAdapters(&en) != 0) return;
+    for (ULONG i = 0; i < en.NumAdapters; ++i) {
+        g_kmtAdapters.push_back(infos[i].hAdapter);
+    }
+}
+
+static void CloseKmtAdapters() {
+    if (g_kmtCloseAdapter) {
+        for (Kmt::D3DKMT_HANDLE h : g_kmtAdapters) {
+            Kmt::CLOSEADAPTER close = {h};
+            g_kmtCloseAdapter(&close);
+        }
+    }
+    g_kmtAdapters.clear();
+}
+
+static int GetGpuTemperatureC() {
+    if (!g_kmtInitTried && GetTickCount64() >= g_kmtRetryAfterTick) {
+        OpenKmtAdapters();
+    }
+    if (!g_kmtQueryAdapterInfo) return -1;  // gdi32 lacks D3DKMT: nothing to retry
+    if (g_kmtAdapters.empty()) {
+        if (g_kmtInitTried) {  // enumeration failed; try again later
+            g_kmtInitTried = false;
+            g_kmtRetryAfterTick = GetTickCount64() + 30000;
+        }
+        return -1;
+    }
+
+    int hottest = -1;
+    int answered = 0;
+    for (Kmt::D3DKMT_HANDLE h : g_kmtAdapters) {
+        Kmt::ADAPTER_PERFDATA perf = {};
+        Kmt::QUERYADAPTERINFO query = {};
+        query.hAdapter = h;
+        query.Type = Kmt::kQueryAdapterPerfData;
+        query.pPrivateDriverData = &perf;
+        query.PrivateDriverDataSize = sizeof(perf);
+        // The software renderer (Microsoft Basic Render Driver) always
+        // rejects this query, so a single failure means nothing.
+        if (g_kmtQueryAdapterInfo(&query) != 0) {
+            continue;
+        }
+        ++answered;
+        // 0 means "not reported"; anything outside 1-150 C is treated as junk.
+        const int celsius = static_cast<int>(perf.Temperature / 10);
+        if (celsius > 0 && celsius < 150 && celsius > hottest) {
+            hottest = celsius;
+        }
+    }
+    // Every adapter refusing means the handles went stale (driver update, GPU
+    // removed) or this Windows lacks the query: close them and try again in
+    // 30 s rather than re-enumerating every second. A GPU that answers with 0
+    // (asleep, or an integrated one) is not a failure and keeps its handle.
+    if (answered == 0) {
+        CloseKmtAdapters();
+        g_kmtInitTried = false;
+        g_kmtRetryAfterTick = GetTickCount64() + 30000;
+    }
+    return hottest;
+}
+
 static PDH_HQUERY g_netQuery = NULL;
 static PDH_HCOUNTER g_netUpCounter = NULL;
 static PDH_HCOUNTER g_netDownCounter = NULL;
@@ -6966,7 +7137,7 @@ void CycleHardwareDisk() {
     g_layoutDirty = true;
 }
 
-void UpdateSystemSnapshot(bool includeGpuStats, bool includeNetStats) {
+void UpdateSystemSnapshot(bool includeGpuStats, bool includeNetStats, bool includeHwDetails) {
     SystemSnapshot next;
     {
         std::lock_guard lock(g_stateMutex);
@@ -6984,6 +7155,13 @@ void UpdateSystemSnapshot(bool includeGpuStats, bool includeNetStats) {
     }
     if (includeNetStats) {
         GetNetworkUsage(next.netUpMbps, next.netDownMbps);
+    }
+    // CPU clock and GPU temperature appear only on the Hardware Monitor tab.
+    // Both are cheap (one PDH collect, one kernel query per adapter), but
+    // there is still no reason to read them while nothing shows them.
+    if (includeHwDetails) {
+        next.cpuGHz = GetCpuClockGHz();
+        next.gpuTempC = GetGpuTemperatureC();
     }
 
     MEMORYSTATUSEX memory = {};
@@ -10971,8 +11149,17 @@ class Renderer {
             boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         }
 
-        wchar_t cpuBuf[32], ramBuf[16], ramDetail[40], gpuBuf[32], diskBuf[32], diskLabel[16];
+        wchar_t cpuBuf[32], cpuDetail[16], ramBuf[16], ramDetail[40], gpuBuf[32], gpuDetail[16];
+        wchar_t diskBuf[32], diskLabel[16];
         swprintf_s(cpuBuf, L"%d%%", state.system.cpuPercent);
+        // CPU clock and GPU temperature ride along as muted details, like
+        // RAM's used / total; each is left out when the source has no value.
+        if (state.system.cpuGHz > 0.05f) {
+            swprintf_s(cpuDetail, L"%.1f GHz", state.system.cpuGHz);
+        }
+        if (state.system.gpuTempC > 0) {
+            swprintf_s(gpuDetail, L"%d\u00B0C", state.system.gpuTempC);
+        }
         swprintf_s(ramBuf, L"%d%%", state.system.memoryPercent);
         // Total rounded to whole GB (31.9 -> 32) so "used/total" fits beside
         // the percentage.
@@ -11001,11 +11188,13 @@ class Renderer {
 
         constexpr int kMetricCount = 4;
         const HwMetric metrics[kMetricCount] = {
-            {3, L"CPU",     cpuBuf,  Clamp(state.system.cpuPercent / 100.0f, 0.0f, 1.0f), nullptr},
+            {3, L"CPU",     cpuBuf,  Clamp(state.system.cpuPercent / 100.0f, 0.0f, 1.0f),
+                state.system.cpuGHz > 0.05f ? cpuDetail : nullptr},
             {4, L"RAM",     ramBuf,  ramFraction, ramDetail},
             {5, L"GPU",     gpuBuf,  state.system.gpuPercent >= 0
                                          ? Clamp(state.system.gpuPercent / 100.0f, 0.0f, 1.0f)
-                                         : -1.0f, nullptr},
+                                         : -1.0f,
+                state.system.gpuTempC > 0 ? gpuDetail : nullptr},
             {8, diskLabel,  diskBuf, Clamp(diskUsed / 100.0f, 0.0f, 1.0f), nullptr},
         };
 
@@ -15736,7 +15925,7 @@ DWORD WINAPI RenderThreadProc(void*) {
             const bool needGpuStats = gameOverlayVisible || hwMonitorVisible;
             const bool needNetStats = false;  // no surface draws network throughput any more
 
-            UpdateSystemSnapshot(needGpuStats, needNetStats);
+            UpdateSystemSnapshot(needGpuStats, needNetStats, hwMonitorVisible);
             nextSystemPoll = now + 1.0;
         }
 
@@ -16085,6 +16274,8 @@ DWORD WINAPI RenderThreadProc(void*) {
         static int prevRam = -1;
         static int prevDisk = -1;
         static int prevHwDisk = -1;
+        static int prevCpuDeciGHz = -1;  // tenths of a GHz, the precision drawn
+        static int prevGpuTemp = -1;
         static wchar_t prevHwDiskLetter = 0;
         static int prevVol = -1;
         static bool prevMuted = false;
@@ -16104,7 +16295,9 @@ DWORD WINAPI RenderThreadProc(void*) {
                                      snapshot.system.memoryPercent != prevRam ||
                                      snapshot.system.diskFreePercent != prevDisk ||
                                      snapshot.system.hwDiskFreePercent != prevHwDisk ||
-                                     snapshot.system.hwDiskLetter != prevHwDiskLetter);
+                                     snapshot.system.hwDiskLetter != prevHwDiskLetter ||
+                                     static_cast<int>(snapshot.system.cpuGHz * 10.0f + 0.5f) != prevCpuDeciGHz ||
+                                     snapshot.system.gpuTempC != prevGpuTemp);
 
         if (snapshot.media.artGeneration != prevArtGen ||
             snapshot.media.sourceIconGeneration != prevSrcIconGen ||
@@ -16134,6 +16327,8 @@ DWORD WINAPI RenderThreadProc(void*) {
             prevDisk = snapshot.system.diskFreePercent;
             prevHwDisk = snapshot.system.hwDiskFreePercent;
             prevHwDiskLetter = snapshot.system.hwDiskLetter;
+            prevCpuDeciGHz = static_cast<int>(snapshot.system.cpuGHz * 10.0f + 0.5f);
+            prevGpuTemp = snapshot.system.gpuTempC;
             prevVol = snapshot.system.volumePercent;
             prevMuted = snapshot.system.volumeMuted;
             prevBat = snapshot.battery.percent;
