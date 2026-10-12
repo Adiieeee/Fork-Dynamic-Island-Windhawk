@@ -54,7 +54,7 @@ Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rus
 "/c/Program Files/Windhawk/Compiler/bin/clang++.exe" -fsyntax-only -Wall -std=c++23 \
   -target x86_64-w64-mingw32 -DWH_MOD -DUNICODE -D_UNICODE \
   -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
-  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.8"' \
+  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.10"' \
   -include windhawk_api.h -x c++ mod.wh.cpp
 ```
 
@@ -180,6 +180,37 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 - Tengah: **notifikasi inline** (§8) kalau ada; selain itu **lirik** (§5).
 - Lebar dasar `MediaLayout::kCollapsedWidth` = 150. Dengan lirik: `kCollapsedLyricsWidth` = 320.
 
+**Waveform (sejak 1.7.10):** waveform menunjukkan **kerasnya suara yang terdengar**, dipengaruhi isi frekuensi dan jumlah "instrumen". Ini bukan spektrum per batang.
+- **Sumber:** `AudioThreadProc` membuka WASAPI loopback pada perangkat output default, hanya saat `g_audioCaptureNeeded` (pill Media tampil dan playing). Semua suara yang keluar ke speaker ikut terhitung, bukan hanya player. `g_waveformAnalyzer.Reset(sampleRate)` dipanggil tiap sesi capture dimulai.
+- **Analisis** (`WaveformAnalyzer`, hanya di thread audio, tanpa mutex):
+  - `PushAudioChunks` mencampur semua channel menjadi mono dan meneruskannya ke **6 band-pass** (RBJ, masing-masing dua tahap) di 80 / 250 / 700 / 2000 / 5000 / 11000 Hz.
+  - Band yang di atas 0,45 × sample rate dimatikan.
+  - Energi tiap band dikumpulkan per **~10 ms** (`sampleRate/100` frame); potongan boleh menyambung antar-paket.
+- **Fitur per potongan** (`FinishChunk`):
+  - **Loudness:** jumlah energi band dengan bobot `0.55, 0.85, 1.0, 1.0, 0.9, 0.7`, kira-kira seperti kepekaan telinga, supaya bass dalam dan desis tidak mendominasi. Hasilnya dalam dBFS.
+  - **Density:** jumlah band yang aktif, yaitu dalam 15 dB (`kWaveformDensitySpanDb`) dari band terkuat dan di atas −65 dB. Hasilnya `(aktif−1)/(band−1)`, dihaluskan dengan EMA 0,92. Satu nada saja ≈ 0,2, orkestra penuh ≈ 1.
+- **Pemetaan** (`Map`):
+  - Acuan puncak `refDb` langsung naik ke puncak baru, lalu turun 0,03 dB per sampel (~3 dB/detik).
+  - Boost = `clamp(−14 − refDb, 0, 8)` dB. Lagu yang di-master pelan diangkat **paling banyak 8 dB**, jadi bagian lembut tetap lebih kecil dari forte.
+  - Level = `((dB + boost) − (−60)) / 50`, pangkat 1,3, lalu dikali `0,6 + 0,4 × density`.
+  - Di bawah −70 dB dianggap hening (0).
+  - Semua konstanta `kWaveform*` ada tepat di atas `WaveformAnalyzer`.
+- **Envelope:** `PushWaveformSample(value 0..1)` menerapkan attack 0,7 / release 0,85, lalu menulis ke ring buffer `g_state.waveform[48]` (~480 ms riwayat).
+- **Nilai 0:** dikirim untuk paket `AUDCLNT_BUFFERFLAGS_SILENT`, atau kalau tidak ada paket sama sekali selama lebih dari 50 ms.
+- **Gambar:** `DrawWaveform` menaruh **sampel terbaru di batang tengah**. Sampel yang lebih lama menyebar simetris ke kiri dan kanan, 4 slot (~40 ms) per batang, dan batang tepi 20% lebih pendek. Ini sama seperti `DrawMinimizedLine`, yang memakai seluruh ring buffer.
+- **Hasil simulasi:**
+
+  | Sinyal | Rata-rata |
+  |---|---|
+  | Flute solo −38 dB | ≈ 0,33 |
+  | Tiga nada lembut −38 dB | ≈ 0,36 |
+  | Tutti keras −14 dB | ≈ 0,84 |
+  | −75 dB | 0 |
+
+- **Riwayat:**
+  - 1.7.9: skala dB dengan auto-gain penuh (jendela 30 dB di bawah acuan, acuan sampai −45 dB). Bagian lembut terlihat sebesar forte.
+  - Sebelum 1.7.9: skala linear `RMS × 4` dengan potongan ~1,3 ms. Musik di bawah sekitar −27 dBFS terlihat diam.
+
 **Card expanded (hover atau pin):** 400×184 (`kExpandedWidth`/`kExpandedHeight`). Sejak 1.7.4 lebarnya 400 (sebelumnya 380) supaya panah ganti player tidak mepet ke tepi; tab lain ikut 400 karena digambar relatif ke rect card.
 - Art 64px, judul/artis/album dengan marquee, waveform, scrubber (bisa di-drag untuk seek lewat `SeekMediaToTicks`), elapsed/remaining.
 - Jarak scrubber ke tepi: `kScrubMargin` 24 + `kScrubBarLeftInset`/`kScrubBarRightInset` 56 (48 sebelum 1.7.4).
@@ -275,6 +306,8 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 **Perilaku yang seharusnya:**
 - Tombol di kiri Previous mengaktifkan mode minimize (disimpan di `Wh_SetIntValue("IslandMinimized")`).
 - Dalam mode minimize, island menjadi **garis 160×8** bergaya glass yang menempel **3px dari tepi atas layar** (atau tepi bawah untuk posisi Bottom). Di garis tampil waveform tipis berwarna aksen yang memancar dari tengah dengan ujung memudar, atau titik diam saat pause. Titik privasi tampil di ujung kanan.
+  - Waveform garis memakai ring buffer `g_state.waveform` yang sama dengan pill/card, jadi tingginya mengikuti analyzer di §4 (loudness berbobot frekuensi, density, auto-gain maks +8 dB). Audio tetap direkam karena jenis pill-nya tetap Media.
+  - Garis ini menampilkan **seluruh buffer** dari tengah ke tepi. Sejak 1.7.9 satu sampel ≈ 10 ms, jadi tengah ke tepi ≈ 480 ms (sebelumnya ≈ 64 ms), dan denyutnya menyebar lebih lambat daripada pill (~120 ms). Batang tepi memudar lewat transparansi (`edgeFade`), tingginya tidak dikurangi.
 - **Hover:** hitbox = garis + 4px ke samping + 4px ke bawah + sampai tepi layar, **tanpa jeda**. Hover selalu membuka card penuh, walaupun Expand-on-hover mati. Card terbuka dari tepi atas, dan menutup lagi saat mouse keluar card.
 - Island tetap di tepi selama minimize, juga saat terbuka, supaya tidak terjadi loop buka-tutup.
 - Notifikasi sesaat tetap memunculkan pill, lalu kembali jadi garis.
@@ -293,7 +326,7 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 | Render loop: `minimizedLine` | 14175 | override ukuran ke garis, `renderer.SetMinimizedLine` |
 | Render loop: `edgeSpring` | 14266 | spring critically damped, set `g_layoutDirty` saat bergerak |
 | `Renderer::Render` | 7687 | menggambar garis (`DrawMinimizedLine`) saat `minimizedLine_` aktif atau tinggi < 24 dalam mode minimize |
-| `DrawMinimizedLine` | 11575 | isi pill alpha 0.5, kilau gradient putih 0.16→0, batang waveform 1.6px |
+| `DrawMinimizedLine` | 11575 | isi pill alpha 0.5, kilau gradient putih 0.16→0, batang waveform 1.6px, sampel terbaru di tengah, umur sampel = jarak dari tengah × seluruh buffer (48 slot ≈ 480 ms) |
 | `WM_LBUTTONUP` cmd 4 | 13481 | toggle dan simpan |
 | `expanded` saat klik | `WM_LBUTTONUP` | minimize dan garis fullscreen video dianggap expanded supaya klik pertama tidak "dimakan" |
 
@@ -552,7 +585,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | Klik scrubber meleset dari bar | `g_scrubInsetLeft` / `g_scrubInsetRight` (ditulis `DrawMedia`, dibaca `MediaScrubFractionFromContent` / `MediaScrubFractionUnbounded`) | — |
 | Cover selalu badge | `ReadWinRtStreamBytes`, `DecodeImageBytesToPixels`, `ArtworkThreadProc` | `Windows.Storage.Streams`, WIC |
 | Tombol prev/play/next tidak bekerja | `SendMediaTransportCommand`, `ResolveMediaSession` | SMTC `Try*Async` |
-| Waveform diam | `AudioThreadProc`, `g_audioCaptureNeeded` | WASAPI loopback |
+| Waveform diam | `AudioThreadProc`, `g_audioCaptureNeeded`; kalau hanya kurang peka, konstanta `kWaveform*` di atas `WaveformAnalyzer` (§4) | WASAPI loopback |
 | Notifikasi Windows tidak muncul | `NotificationThreadProc` (cek log akses Denied) | `UserNotificationListener`, izin Privacy → Notifications |
 | Bluetooth tidak terdeteksi | `BluetoothThreadProc` | `DeviceInformation.CreateWatcher`, selector `BluetoothDevice`/`BluetoothLEDevice` |
 | Status DND salah | `SubscribeDndNotification`, `WnfDndCallback` | WNF state `0x0D83063EA3BF1C75` (**undocumented**, sangat mungkin berubah) |
@@ -588,6 +621,8 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | 1.4.0 | **Lirik LRCLIB** di pill collapsed (+ toggle, cache, retry); pembacaan cover bertahap; **cover cadangan iTunes**; `HttpGet` aman untuk biner + timeout; lebar pill dinamis mengikuti lirik (lead 0,35 detik, jeda ≥ 4 detik kembali normal); setting **Lyrics delay (ms)** |
 | 1.5.0 | **Minimize**: garis glass + waveform, menempel 3px dari tepi layar, hitbox kecil tanpa jeda, hover membuka card |
 | 1.6.0 | **Notifikasi inline** di tengah pill musik (tanpa pill kedua, lebar mengikuti notifikasi, maks 460); **tab Aktivitas** untuk Timer/Progress; durasi notifikasi sesaat maksimal 3 detik |
+| 1.7.10 | **Waveform seimbang**: `WaveformAnalyzer` dengan 6 band-pass (loudness berbobot frekuensi + density jumlah band aktif sebagai perkiraan jumlah instrumen); auto-gain dibatasi +8 dB, skala absolut −60…−10 dBFS dengan kurva 1,3, sehingga musik lembut bergerak tapi tetap kecil; `DrawWaveform` kini memancar dari tengah ke kiri dan kanan seperti garis minimize |
+| 1.7.9 | **Waveform lebih akurat untuk musik lembut**: skala dB dengan auto-gain (`g_waveformRefDb`, jendela 30 dB, acuan minimal −45 dB, gate −70 dB) menggantikan `RMS × 4` linear; satu sampel per ~10 ms sehingga release dan jarak antar-batang sesuai waktu nyata; tidak ada lagi nilai 0 palsu di antara paket |
 | 1.7.7 | **Tab Hardware disederhanakan**: 4 kartu (CPU, RAM, GPU, DISK) dalam grid 2×2 dengan geometri di `HardwareLayout`; NET UP/DOWN dihapus dan counter jaringan tidak lagi dipoll; ikon 21px dalam well bulat, sudut kartu mengikuti bentuk island, label lebih terang; RAM menampilkan persen + `used/total GB`; **CPU menampilkan GHz** (PDH `% Processor Performance`) dan **GPU menampilkan suhu** (D3DKMT adapter perf data), keduanya hanya dibaca saat tab Hardware tampil; **panah ganti drive** di kartu DISK (`CycleHardwareDisk`, disimpan di `HardwareDiskLetter`) |
 | 1.7.6 | **Brightness**: pill brightness seperti volume (WMI `WmiMonitorBrightnessEvent`), OSD brightness Windows disembunyikan (WinEvent hook ke explorer), tombol brightness dipelajari untuk kasus 0%/100%; setting `Brightness`; `DrawVolume` dan `DrawBrightness` berbagi `DrawLevelPill`; link `-lwbemuuid` |
 | 1.7.5 | **Penjelasan chip cuaca saat hover**: angin, terasa, dan kelembapan di tab Tanggal & Cuaca memunculkan kartu penjelasan singkat (12 bahasa); geometri chip dipindah ke `WeatherLayout` |

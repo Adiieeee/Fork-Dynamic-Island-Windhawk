@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.7.8
+// @version         1.7.10
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -5440,11 +5440,10 @@ float SampleAudioAmplitude(BYTE* data, UINT32 frames, WAVEFORMATEX* format) {
         }
     }
 
-    const double rms = samples ? std::sqrt(sum / samples) : 0.0;
-    return Clamp(static_cast<float>(rms * 4.0), 0.0f, 1.0f);
+    return samples ? static_cast<float>(std::sqrt(sum / samples)) : 0.0f;
 }
 
-void PushWaveformSample(float amplitude) {
+void PushWaveformSample(float value) {
     std::lock_guard lock(g_stateMutex);
 
     float lastVal = 0.0f;
@@ -5455,15 +5454,169 @@ void PushWaveformSample(float amplitude) {
     // Apply an attack/release envelope (Exponential Moving Average)
     // Quick snappy attack (0.7) for beats, buttery smooth release (0.85) for decay.
     float smoothed;
-    if (amplitude > lastVal) {
-        smoothed = lastVal * 0.3f + amplitude * 0.7f;
+    if (value > lastVal) {
+        smoothed = lastVal * 0.3f + value * 0.7f;
     } else {
-        smoothed = lastVal * 0.85f + amplitude * 0.15f;
+        smoothed = lastVal * 0.85f + value * 0.15f;
     }
 
     g_state.waveform[g_state.waveformWrite % g_state.waveform.size()] = smoothed;
     ++g_state.waveformWrite;
 }
+
+// Waveform level. Every ~10 ms of audio becomes one 0..1 sample built from
+// three things: perceived loudness (band energies weighted roughly like the
+// ear, so sub-bass and hiss don't dominate), a gentle auto-gain capped at a
+// few dB (quiet masters are lifted a little, but a soft passage stays smaller
+// than a forte), and spectral density -- how many bands are active, a stand-in
+// for how many instruments are playing, so a solo flute reads shorter than a
+// full orchestra at the same volume.
+constexpr float kWaveformFloorDb = -60.0f;       // loudness that maps to an empty bar
+constexpr float kWaveformRangeDb = 50.0f;        // floor + range = full bar (-10 dBFS)
+constexpr float kWaveformGateDb = -70.0f;        // below this the chunk counts as silence
+constexpr float kWaveformTargetDb = -14.0f;      // reference level that gets no boost
+constexpr float kWaveformMaxBoostDb = 8.0f;      // most a quiet track is lifted
+constexpr float kWaveformRefDecayDb = 0.03f;     // per sample, about 3 dB/s
+constexpr float kWaveformCurve = 1.3f;           // >1 keeps quiet parts low
+constexpr float kWaveformDensityWeight = 0.4f;   // share of the bar decided by density
+constexpr float kWaveformDensitySpanDb = 15.0f;  // band counts as active within this of the strongest
+
+struct WaveformAnalyzer {
+    static constexpr int kBands = 6;
+    static constexpr float kBandHz[kBands] = {80.0f, 250.0f, 700.0f, 2000.0f, 5000.0f, 11000.0f};
+    static constexpr float kBandWeight[kBands] = {0.55f, 0.85f, 1.0f, 1.0f, 0.9f, 0.7f};
+
+    struct Biquad {
+        double b0 = 0, b2 = 0, a1 = 0, a2 = 0;  // band-pass: b1 = 0
+        double z1 = 0, z2 = 0;
+        bool enabled = false;
+
+        double w1 = 0, w2 = 0;  // second, identical stage: 12 dB/octave skirts
+
+        double Run(double x) {
+            const double y = b0 * x + z1;
+            z1 = -a1 * y + z2;
+            z2 = b2 * x - a2 * y;
+            const double y2 = b0 * y + w1;
+            w1 = -a1 * y2 + w2;
+            w2 = b2 * y - a2 * y2;
+            return y2;
+        }
+    };
+
+    std::array<Biquad, kBands> bands{};
+    std::array<double, kBands> bandEnergy{};
+    UINT32 sampleRate = 0;
+    UINT32 chunkFrames = 480;
+    UINT32 chunkFill = 0;
+    float refDb = kWaveformTargetDb;
+    float density = 0.5f;
+
+    void Reset(UINT32 rate) {
+        sampleRate = rate ? rate : 48000;
+        chunkFrames = std::max<UINT32>(64, sampleRate / 100);
+        chunkFill = 0;
+        bandEnergy.fill(0.0);
+        refDb = kWaveformTargetDb;
+        density = 0.5f;
+        // RBJ constant-0-dB-peak band-pass, run twice so a single tone stays in
+        // its own band instead of leaking into the neighbours.
+        constexpr double q = 1.0;
+        for (int b = 0; b < kBands; ++b) {
+            Biquad& f = bands[b];
+            f = Biquad{};
+            if (kBandHz[b] >= sampleRate * 0.45f) {
+                continue;
+            }
+            const double w0 = 2.0 * 3.14159265358979 * kBandHz[b] / sampleRate;
+            const double alpha = std::sin(w0) / (2.0 * q);
+            const double a0 = 1.0 + alpha;
+            f.b0 = alpha / a0;
+            f.b2 = -alpha / a0;
+            f.a1 = -2.0 * std::cos(w0) / a0;
+            f.a2 = (1.0 - alpha) / a0;
+            f.enabled = true;
+        }
+    }
+
+    // Loudness in dB plus density (0..1) -> bar value (0..1).
+    float Map(float loudDb, float densityNow) {
+        if (loudDb > refDb) {
+            refDb = loudDb;
+        } else {
+            refDb = std::max(loudDb, refDb - kWaveformRefDecayDb);
+        }
+        if (loudDb < kWaveformGateDb) {
+            return 0.0f;
+        }
+        const float boost = Clamp(kWaveformTargetDb - refDb, 0.0f, kWaveformMaxBoostDb);
+        float level = Clamp((loudDb + boost - kWaveformFloorDb) / kWaveformRangeDb, 0.0f, 1.0f);
+        level = std::pow(level, kWaveformCurve);
+        return level * ((1.0f - kWaveformDensityWeight) + kWaveformDensityWeight * densityNow);
+    }
+
+    void FinishChunk() {
+        double loud = 0.0;
+        double strongest = 0.0;
+        for (int b = 0; b < kBands; ++b) {
+            if (!bands[b].enabled) {
+                continue;
+            }
+            const double e = bandEnergy[b] / chunkFill;
+            loud += e * kBandWeight[b];
+            strongest = std::max(strongest, e);
+        }
+
+        if (strongest > 1e-10) {
+            const double activeFloor =
+                std::max(strongest * std::pow(10.0, -kWaveformDensitySpanDb / 10.0),
+                         std::pow(10.0, (kWaveformGateDb + 5.0) / 10.0));
+            int active = 0;
+            int enabled = 0;
+            for (int b = 0; b < kBands; ++b) {
+                if (bands[b].enabled) {
+                    ++enabled;
+                    if (bandEnergy[b] / chunkFill >= activeFloor) {
+                        ++active;
+                    }
+                }
+            }
+            const float densityNow =
+                enabled > 1 ? static_cast<float>(std::max(0, active - 1)) / (enabled - 1) : 0.5f;
+            density = density * 0.92f + densityNow * 0.08f;
+        }
+
+        const float loudDb = static_cast<float>(10.0 * std::log10(std::max(loud, 1e-10)));
+        PushWaveformSample(Map(loudDb, density));
+        bandEnergy.fill(0.0);
+        chunkFill = 0;
+    }
+
+    void Process(BYTE* data, UINT32 frames, UINT32 channels, bool isFloat) {
+        auto* f = reinterpret_cast<float*>(data);
+        auto* s = reinterpret_cast<int16_t*>(data);
+        for (UINT32 frame = 0; frame < frames; ++frame) {
+            double mono = 0.0;
+            const size_t base = static_cast<size_t>(frame) * channels;
+            for (UINT32 c = 0; c < channels; ++c) {
+                mono += isFloat ? f[base + c] : s[base + c] / 32768.0;
+            }
+            mono /= channels;
+
+            for (int b = 0; b < kBands; ++b) {
+                if (bands[b].enabled) {
+                    const double y = bands[b].Run(mono);
+                    bandEnergy[b] += y * y;
+                }
+            }
+            if (++chunkFill >= chunkFrames) {
+                FinishChunk();
+            }
+        }
+    }
+};
+
+WaveformAnalyzer g_waveformAnalyzer;  // audio thread only
 
 void PushAudioChunks(BYTE* data, UINT32 frames, WAVEFORMATEX* format) {
     if (!data || !frames || !format || !format->nChannels) {
@@ -5471,8 +5624,6 @@ void PushAudioChunks(BYTE* data, UINT32 frames, WAVEFORMATEX* format) {
         return;
     }
 
-    constexpr UINT32 chunkFrames = 64;
-    const UINT32 channels = format->nChannels;
     const bool isFloat =
         format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
         (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
@@ -5482,32 +5633,17 @@ void PushAudioChunks(BYTE* data, UINT32 frames, WAVEFORMATEX* format) {
     const bool is16 = format->wBitsPerSample == 16;
 
     if (!isFloat && !is16) {
-        PushWaveformSample(SampleAudioAmplitude(data, frames, format));
+        // No band analysis for exotic formats: plain RMS, average density.
+        const float rms = SampleAudioAmplitude(data, frames, format);
+        PushWaveformSample(
+            g_waveformAnalyzer.Map(20.0f * std::log10(std::max(rms, 1e-5f)), 0.5f));
         return;
     }
 
-    for (UINT32 frame = 0; frame < frames; frame += chunkFrames) {
-        const UINT32 chunk = std::min(chunkFrames, frames - frame);
-        double sum = 0.0;
-        const size_t samples = static_cast<size_t>(chunk) * channels;
-        const size_t start = static_cast<size_t>(frame) * channels;
-
-        if (isFloat) {
-            auto* f = reinterpret_cast<float*>(data);
-            for (size_t i = 0; i < samples; ++i) {
-                const double v = f[start + i];
-                sum += v * v;
-            }
-        } else {
-            auto* s = reinterpret_cast<int16_t*>(data);
-            for (size_t i = 0; i < samples; ++i) {
-                const double v = s[start + i] / 32768.0;
-                sum += v * v;
-            }
-        }
-
-        PushWaveformSample(Clamp(static_cast<float>(std::sqrt(sum / samples) * 4.0), 0.0f, 1.0f));
+    if (g_waveformAnalyzer.sampleRate != format->nSamplesPerSec) {
+        g_waveformAnalyzer.Reset(format->nSamplesPerSec);
     }
+    g_waveformAnalyzer.Process(data, frames, format->nChannels, isFloat);
 }
 
 // --- Weather Fetching Helpers ---
@@ -6813,6 +6949,7 @@ DWORD WINAPI AudioThreadProc(void*) {
         // don't flag a stall before the first packet has even arrived.
         double lastPacketTime = NowSeconds();
         double nextWatchdogCheck = lastPacketTime + 1.0;
+        g_waveformAnalyzer.Reset(mixFormat->nSamplesPerSec);
 
         while (WaitForSingleObject(g_stopEvent, 16) == WAIT_TIMEOUT) {
             if (!g_audioCaptureNeeded.load(std::memory_order_relaxed)) {
@@ -6823,7 +6960,6 @@ DWORD WINAPI AudioThreadProc(void*) {
                 break;
             }
 
-            float amplitude = 0.0f;
             int packets = 0;
             while (packetFrames > 0) {
                 BYTE* data = nullptr;
@@ -6836,7 +6972,6 @@ DWORD WINAPI AudioThreadProc(void*) {
                 lastPacketTime = NowSeconds();
 
                 if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT)) {
-                    amplitude = std::max(amplitude, SampleAudioAmplitude(data, frames, mixFormat));
                     PushAudioChunks(data, frames, mixFormat);
                 } else {
                     PushWaveformSample(0.0f);
@@ -6849,11 +6984,10 @@ DWORD WINAPI AudioThreadProc(void*) {
                 }
             }
 
-            if (packets > 0) {
-                if (amplitude <= 0.001f) {
-                    PushWaveformSample(0.0f);
-                }
-            } else {
+            // A poll can land between packets while audio is flowing; pushing a
+            // zero then would put dips between real samples. Only let the bars
+            // fall once packets have really stopped.
+            if (packets == 0 && NowSeconds() - lastPacketTime > 0.05) {
                 PushWaveformSample(0.0f);
             }
 
@@ -13407,15 +13541,19 @@ class Renderer {
         const float centerY = (rect.top + rect.bottom) * 0.5f;
         const float maxH = (rect.bottom - rect.top) * 0.86f;
 
-        // Use a step size of 4 samples (approx 40ms) so bars aren't identical
-        const size_t step = 4;
+        // The newest sample sits in the middle bar and older ones move outward
+        // to both edges, 4 samples (~40 ms) per bar, so sound pulses from the
+        // centre like the minimized line. Edges are slightly shorter.
+        const int step = 4;
+        const int size = static_cast<int>(state.waveform.size());
+        const float half = (count - 1) * 0.5f;
 
         for (size_t i = 0; i < count; ++i) {
-            const size_t offset = (count - i) * step;
-            const size_t source = (state.waveformWrite + state.waveform.size() - offset) %
-                                  state.waveform.size();
+            const float fromCenter = (half > 0.0f) ? std::fabs(i - half) / half : 0.0f;
+            const int age = std::min(size - 1, static_cast<int>(std::lround(std::fabs(i - half) * step)));
+            const int source = ((static_cast<int>(state.waveformWrite) - 1 - age) % size + size) % size;
             const float amp = Clamp(state.waveform[source], 0.03f, 1.0f);
-            const float h = std::max(3.0f, amp * maxH);
+            const float h = std::max(3.0f, amp * maxH * (1.0f - 0.2f * fromCenter));
             const float x = rect.left + i * (barWidth + gap);
             D2D1_RECT_F bar = D2D1::RectF(x, centerY - h * 0.5f, x + barWidth, centerY + h * 0.5f);
             accentBrush_->SetOpacity(0.45f + 0.5f * amp);
