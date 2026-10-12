@@ -2,7 +2,7 @@
 
 Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rusak (misalnya setelah update Windows), dokumen ini menjelaskan **perilaku yang seharusnya**, **di mana kodenya**, dan **API Windows apa yang dipakai**, supaya perbaikan bisa mengembalikan fungsi yang sama persis.
 
-- **Versi kode saat dokumen ditulis:** `1.7.5` (header `@version`), sekitar 15.700 baris.
+- **Versi kode saat dokumen ditulis:** `1.7.6` (header `@version`), sekitar 15.700 baris.
 - **Nomor baris** di bawah berlaku untuk versi ini dan akan bergeser saat kode berubah. **Selalu cari nama fungsinya** (misalnya `grep -n "DrawMinimizedLine" mod.wh.cpp`). Nama fungsi adalah acuan utama; nomor baris hanya petunjuk awal.
 - Konvensi umum proyek (proses tool-mod, threading, lokalisasi) juga diringkas di `CLAUDE.md`.
 
@@ -19,6 +19,7 @@ Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rus
 7. [Fitur: Minimize (garis tipis)](#7-fitur-minimize-garis-tipis)
 8. [Fitur: Notifikasi sesaat & notifikasi inline](#8-fitur-notifikasi-sesaat--notifikasi-inline)
 9. [Fitur: Volume (instan + OSD Windows disembunyikan)](#9-fitur-volume)
+   - [Brightness (sejak 1.7.6)](#91-brightness-sejak-176)
 10. [Fitur: Tab dashboard (Tanggal & Cuaca, Hardware, File Tray, Aktivitas)](#10-fitur-tab-dashboard)
 11. [Fitur: Idle strip, Game overlay, Privasi, Timer](#11-fitur-idle-strip-game-overlay-privasi-timer)
 12. [Fitur: Posisi, tema, backdrop, auto-hide, hotkey, menu](#12-fitur-posisi-tema-backdrop-auto-hide-hotkey-menu)
@@ -53,7 +54,7 @@ Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rus
 "/c/Program Files/Windhawk/Compiler/bin/clang++.exe" -fsyntax-only -Wall -std=c++23 \
   -target x86_64-w64-mingw32 -DWH_MOD -DUNICODE -D_UNICODE \
   -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
-  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.5"' \
+  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.6"' \
   -include windhawk_api.h -x c++ mod.wh.cpp
 ```
 
@@ -84,9 +85,10 @@ Semua thread dibuat di `StartThreads()` (±14636) dan dihentikan oleh `StopThrea
 | Lirik | `LyricsThreadProc` (5573) | LRCLIB untuk lirik ber-timestamp |
 | Cover fallback | `ArtworkThreadProc` (5759) | iTunes Search kalau SMTC tidak memberi cover |
 | Volume watcher | `VolumeWatcherThreadProc` (6344) | callback volume dari Windows (event, bukan poll) |
+| Brightness | `BrightnessThreadProc`, `BrightnessOsdThreadProc` | event WMI `WmiMonitorBrightnessEvent`; hook `EVENT_OBJECT_SHOW` ke explorer untuk menyembunyikan OSD brightness (§9.1) |
 | Notifikasi | `NotificationThreadProc` (4237) | `UserNotificationListener` WinRT |
 | Bluetooth | `BluetoothThreadProc` (4780 / stub 4865) | `DeviceWatcher` WinRT untuk perangkat BT terhubung |
-| Keyboard | `KeyboardThreadProc` (12832) | hook `WH_KEYBOARD_LL`: Caps/Num Lock dan tombol volume |
+| Keyboard | `KeyboardThreadProc` (12832) | hook `WH_KEYBOARD_LL`: Caps/Num Lock, tombol volume, dan mencatat tombol tanpa VK (brightness) |
 | Mouse | `MouseThreadProc` (12928) | hook `WH_MOUSE_LL`, hanya saat island di-park, untuk unhide-on-hover |
 
 DND tidak memakai thread sendiri, tapi subscription WNF (`SubscribeDndNotification`, ±4199).
@@ -305,6 +307,7 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 | Clipboard | `WM_CLIPBOARDUPDATE` → `CaptureClipboard` (±6889): teks (`CF_UNICODETEXT`), gambar (`CF_DIB`), ikon app pemilik | 2,5 detik | `Clipboard` |
 | CapsLock (Caps/Num) | hook keyboard → `WM_APP_CAPSLOCK` | 2,5 detik | `CapsLock` |
 | Volume | `VolumeChangeCallback` (§9) | 1,8 detik | `Volume` |
+| Brightness | `ReportBrightnessChange` (§9.1) | 1,8 detik | `Brightness` |
 | Notification | `NotificationThreadProc` (±4237): `UserNotificationListener.GetNotificationsAsync(Toast)` dipoll tiap 1 detik, ID yang sudah dilihat dilewati, ikon app 32px | 3 detik | `NotificationRespectDnD` (diam saat DND) |
 | BatteryLow | `UpdateBatterySnapshot` (±5985): `GetSystemPowerStatus`; charger dicolok/dicabut, atau turun ke 20%/10% | 3 detik | `Battery` |
 | Device | `WM_DEVICECHANGE`: USB Drive (`DBT_DEVTYP_VOLUME`), COM, lainnya | 3 detik | — |
@@ -312,7 +315,7 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 | DoNotDisturb | WNF `kWnfQuietHoursActiveProfileChanged` (`WnfDndCallback` ±4166) | 3 detik | `DoNotDisturbIndicator` |
 | Timer selesai | render loop (`finishedExpiresAt`) | 3 detik | `TimerModule` |
 
-Kartu penuh per jenis (dipakai saat **tidak ada musik**): `DrawClipboard` (±11685), `DrawNotification` (11755), `DrawVolume` (11829), `DrawTimer` (11988), `DrawCapsLock` (12078), `DrawDevice` (12142), `DrawDoNotDisturb` (12210), `DrawBluetoothDevice` (12309), `DrawBattery` (12409). Setting `StatusCountdownProgress` menambah garis hitung mundur, dengan konstanta `ttl` di masing-masing fungsi yang harus sama dengan durasi di atas.
+Kartu penuh per jenis (dipakai saat **tidak ada musik**): `DrawClipboard` (±11685), `DrawNotification` (11755), `DrawVolume` (11829) dan `DrawBrightness` (keduanya lewat `DrawLevelPill`), `DrawTimer` (11988), `DrawCapsLock` (12078), `DrawDevice` (12142), `DrawDoNotDisturb` (12210), `DrawBluetoothDevice` (12309), `DrawBattery` (12409). Setting `StatusCountdownProgress` menambah garis hitung mundur, dengan konstanta `ttl` di masing-masing fungsi yang harus sama dengan durasi di atas.
 
 ### 8.2 Notifikasi inline (saat musik diputar)
 **Perilaku:**
@@ -358,6 +361,29 @@ Kartu penuh per jenis (dipakai saat **tidak ada musik**): `DrawClipboard` (±116
 4. **Log diagnostik:** `Volume key: vk=0x.. injected=..` (maksimal 1 per 2 detik per kombinasi), untuk memastikan Fn + F atau knob keyboard tertangkap.
 
 **Batasan:** volume dari software OEM yang mengubah volume langsung (tanpa tombol), atau dari tombol headset Bluetooth, tidak lewat hook, jadi OSD-nya mungkin tetap muncul. Notifikasi island tetap seketika lewat callback.
+
+### 9.1 Brightness (sejak 1.7.6)
+
+**Perilaku yang seharusnya:** saat brightness layar laptop berubah (tombol, slider Settings), island menampilkan pill brightness yang sama dengan pill volume (ikon matahari `\uE706`, label "Brightness", persen, bar aksen) selama 1,8 detik, dan OSD brightness Windows tidak terlihat. Setting `Brightness` (default nyala). Saat musik diputar, pill muncul inline di pill media; di atas fullscreen video, brightness ikut lolos seperti volume.
+
+**Kenapa tidak bisa seperti volume:** tombol brightness laptop adalah hotkey firmware. Saat event sampai ke Windows, brightness sudah berubah, dan shell menampilkan OSD karena *perubahannya*, bukan karena tombol. Diuji di HP Victus 15 (Win11 25H2): tombol mengirim event keyboard `vk=0xFF scan=0x2B` (extended, sama untuk naik dan turun); menelannya tidak mencegah perubahan brightness maupun OSD. OSD-nya adalah `XamlExplorerHostIslandWindow` kecil milik explorer.exe di tengah bawah layar, tampil ±2 detik.
+
+**Cara kerja:**
+1. **Deteksi:** `BrightnessThreadProc` berlangganan `SELECT * FROM WmiMonitorBrightnessEvent` di `ROOT\WMI` (semisync, `Next` dengan timeout 1 detik hanya untuk mengecek stop event). Setiap event: `g_lastBrightness`, `g_lastBrightnessEventMs`, lalu `ReportBrightnessChange` mengisi `g_state.brightness` dan `TriggerNudge`.
+2. **Menyembunyikan OSD:** `BrightnessOsdThreadProc` memasang `SetWinEventHook(EVENT_OBJECT_SHOW)` hanya untuk proses explorer (pid dari `Shell_TrayWnd`, dicek ulang tiap 5 detik untuk restart explorer atau toggle setting). `BrightnessOsdShown` menyaring `LooksLikeShellOsd` (class `XamlExplorerHostIslandWindow`, maksimal 1/3 lebar dan 1/5 tinggi monitor, supaya Alt+Tab tidak kena), lalu menyembunyikannya dengan `ShowWindowAsync(SW_HIDE)` kalau:
+   - ada event WMI < 1,5 detik sebelumnya; atau
+   - tombol brightness yang sudah dipelajari baru ditekan (< 0,8 detik); atau
+   - query langsung `WmiMonitorBrightness.CurrentBrightness` berbeda dari `g_lastBrightness` (event WMI belum datang).
+   Window **selalu dicatat dulu** di `g_pendingBrightnessOsd` sebelum pengecekan di atas, dan thread WMI **mencatat waktu event dulu** (`g_lastBrightnessEventMs`) sebelum mengambil window pending. Dengan urutan ini (atomic seq_cst di kedua sisi), minimal salah satu pihak pasti melihat yang lain. Versi awal 1.7.6 mengecek dulu baru mencatat, sehingga kalau event WMI datang tepat di antaranya, OSD pada tekanan pertama tidak disembunyikan (baru tekanan kedua yang menyembunyikannya). Selisih waktu pending dihitung dengan tick baru dan dijaga dari wrap-around unsigned.
+3. **Di 0% / 100%:** menekan tombol tidak mengubah apa pun sehingga tidak ada event WMI, tapi OSD tetap muncul. Hook keyboard mencatat setiap tombol `vk 0xFF` (`NoteUnmappedKey`, hanya store atomic, tombol tidak ditelan). Kalau event WMI datang < 0,4 detik setelah tombol itu, scan code-nya dipelajari sebagai tombol brightness (`g_brightnessKeyScan`, log `Brightness: learned brightness key scan=0x..`). Setelah itu tombol yang sama di 0%/100% tetap menyembunyikan OSD dan memunculkan pill. Pembelajaran ini hilang saat mod restart (butuh satu perubahan brightness sungguhan dulu).
+4. `KeyboardHookWanted` sekarang `capsLock || volume || brightness`.
+
+**Log:** `Brightness: shell OSD shown, sinceEvent=..ms key=.. query=.. changed=.. -> hide/left pending` (setiap OSD explorer yang lolos `LooksLikeShellOsd`), `Brightness: hid the Windows brightness flyout (recent change / brightness key / level changed / after change)`, `Brightness: learned brightness key scan=0x..`, `Brightness: no built-in panel reports brightness; module idle`.
+
+**Batasan:**
+- Hanya panel bawaan (laptop). Monitor eksternal tidak melapor ke WMI, jadi kedua thread berhenti dan OSD Windows dibiarkan.
+- OSD mungkin terlihat sekilas (beberapa milidetik) sebelum disembunyikan, karena ia ditampilkan oleh explorer lalu baru disembunyikan.
+- Perubahan brightness otomatis (adaptive brightness) juga memunculkan pill.
 
 ---
 
@@ -470,7 +496,7 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
 - **Animations:** TargetFPS, AnimationStyle, AnimationSpeed.
 - **Themes:** ThemePreset, PillOpacity, TintIntensity, BackdropMaterial/FillOpacity/Tint, MaterialDepth, DropShadow, AccentBloom, TextScale, AccentColorMode, CustomAccentHex, CalendarAccent, ClockAccentGlow, FontFamily, ContourBorderMode/Hex, PillBgColor, TextPrimary/SecondaryColor.
 - **Indicators:** PrivacyDots, PrivacyDotsMic/Cam (+warna).
-- **Modules:** Media, MediaAutoExpand, **LyricsDelayMs**, Volume, CapsLock, Battery, BluetoothIndicator, BluetoothShowBattery, Progress, TimerModule, Clipboard, StatusCountdownProgress, DoNotDisturbIndicator, NotificationRespectDnD, HardwareMonitorModule, GameOverlay(+Show*/Compact), ShowMetricText, Weather, **WeatherUseLocation**, WeatherCity, WeatherFahrenheit, Language, ClockFormat, ShowSeconds, DateFormat, DateFirst, FileTrayModule, FileTrayMaxItems, MediaExpandBlocklist.
+- **Modules:** Media, MediaAutoExpand, **LyricsDelayMs**, Volume, **Brightness**, CapsLock, Battery, BluetoothIndicator, BluetoothShowBattery, Progress, TimerModule, Clipboard, StatusCountdownProgress, DoNotDisturbIndicator, NotificationRespectDnD, HardwareMonitorModule, GameOverlay(+Show*/Compact), ShowMetricText, Weather, **WeatherUseLocation**, WeatherCity, WeatherFahrenheit, Language, ClockFormat, ShowSeconds, DateFormat, DateFirst, FileTrayModule, FileTrayMaxItems, MediaExpandBlocklist.
 - **Shortcuts:** HideShowHotkeyEnabled, HideShowModifiers, HideShowKey.
 
 **Nilai tersimpan (`Wh_GetIntValue` / `Wh_SetIntValue`):**
@@ -523,6 +549,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | Status DND salah | `SubscribeDndNotification`, `WnfDndCallback` | WNF state `0x0D83063EA3BF1C75` (**undocumented**, sangat mungkin berubah) |
 | Titik privasi salah | `IsDeviceActiveViaRegistry` | registry `CapabilityAccessManager\ConsentStore` |
 | Volume delay atau tidak muncul | `VolumeWatcherThreadProc`, `VolumeChangeCallback` | `IAudioEndpointVolume`, `IMMNotificationClient` |
+| OSD brightness Windows masih muncul | `BrightnessOsdShown`, `LooksLikeShellOsd` (cek log `Brightness: hid ...`); di 0%/100% cek log `learned brightness key` | `SetWinEventHook`, WMI `WmiMonitorBrightnessEvent` |
 | OSD volume Windows muncul lagi | `LowLevelKeyboardProc`, `KeyboardHookWanted`, `ApplyVolumeKey` (cek log `Volume key:`) | `WH_KEYBOARD_LL`, `VK_VOLUME_*` |
 | Tombol volume mati total | hook menelan tombol tapi `ApplyVolumeKey` gagal: cek endpoint di `ApplyVolumeKey` | Core Audio |
 | Clipboard tidak muncul | `WM_CLIPBOARDUPDATE`, `CaptureClipboard` | `AddClipboardFormatListener` |
@@ -552,6 +579,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | 1.4.0 | **Lirik LRCLIB** di pill collapsed (+ toggle, cache, retry); pembacaan cover bertahap; **cover cadangan iTunes**; `HttpGet` aman untuk biner + timeout; lebar pill dinamis mengikuti lirik (lead 0,35 detik, jeda ≥ 4 detik kembali normal); setting **Lyrics delay (ms)** |
 | 1.5.0 | **Minimize**: garis glass + waveform, menempel 3px dari tepi layar, hitbox kecil tanpa jeda, hover membuka card |
 | 1.6.0 | **Notifikasi inline** di tengah pill musik (tanpa pill kedua, lebar mengikuti notifikasi, maks 460); **tab Aktivitas** untuk Timer/Progress; durasi notifikasi sesaat maksimal 3 detik |
+| 1.7.6 | **Brightness**: pill brightness seperti volume (WMI `WmiMonitorBrightnessEvent`), OSD brightness Windows disembunyikan (WinEvent hook ke explorer), tombol brightness dipelajari untuk kasus 0%/100%; setting `Brightness`; `DrawVolume` dan `DrawBrightness` berbagi `DrawLevelPill`; link `-lwbemuuid` |
 | 1.7.5 | **Penjelasan chip cuaca saat hover**: angin, terasa, dan kelembapan di tab Tanggal & Cuaca memunculkan kartu penjelasan singkat (12 bahasa); geometri chip dipindah ke `WeatherLayout` |
 | 1.7.4 | **Ganti player**: panah di baris scrubber untuk memilih sesi SMTC yang diikuti island (`pinnedMediaSource`, `SwitchMediaSession`, command 5/6), poll media seketika lewat `g_mediaRefreshEvent`; card expanded 400px; teks waktu dan ujung scrubber mengikuti panah dengan jarak sama di kedua sisi. **Garis fullscreen video bisa di-hover** untuk membuka card (setelah island menjadi garis), dan tidak lagi ikut auto-hide idle. Titik privasi (mic/kamera) tidak lagi menahan pill di atas video; deteksi video juga menerima sesi yang tidak Playing (Zen/Firefox, video di-pause); log diagnostik `Video line:` |
 | 1.7.3 | Teks notif clipboard 12px (`clipboardTextFormat_`, juga di pill inline lewat `InlineAlertContent::primaryFormat`); **island sembunyi langsung saat overlay screenshot** (`IsScreenSnipActive`, tanpa topmost/alert sampai selesai; tidak di-exclude dari capture); kotak tanggal tab Tanggal & Cuaca 112px; tombol volume di 100%/0% tetap memunculkan pill |

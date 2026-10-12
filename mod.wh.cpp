@@ -2,11 +2,11 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.7.5
+// @version         1.7.6
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
-// @compilerOptions -lole32 -loleaut32 -lshcore -ld2d1 -ldwrite -ldwmapi -lgdi32 -luser32 -lshell32 -lruntimeobject -lwindowscodecs -lavrt -lsetupapi -lwinhttp -lpdh -lwinmm
+// @compilerOptions -lole32 -loleaut32 -lshcore -ld2d1 -ldwrite -ldwmapi -lgdi32 -luser32 -lshell32 -lruntimeobject -lwindowscodecs -lavrt -lsetupapi -lwinhttp -lpdh -lwinmm -lwbemuuid
 // @license         MIT
 // ==/WindhawkMod==
 
@@ -58,7 +58,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 
 - **Hover & Scroll:** Hover over the island to seamlessly expand it. Use your mouse scroll wheel to swipe between the Media, Date & Weather (today's date beside the current conditions; the monthly calendar when the Weather module is off), Hardware Monitor, and File Tray tabs.
 - **File Tray:** Enable the File Tray module, then drag files onto the island. It jumps to the shelf to confirm the drop. Click a row to open that file; right-click the island to clear the shelf.
-- **Alerts while music plays:** Volume, clipboard, Caps Lock, notifications, battery, USB, Bluetooth and Do Not Disturb alerts appear inside the media pill, between the album art and the waveform (briefly replacing the lyric line), and the pill stretches to fit them. A running focus timer or progress task gets its own Activity tab at the end of the scroll loop instead.
+- **Alerts while music plays:** Volume, brightness, clipboard, Caps Lock, notifications, battery, USB, Bluetooth and Do Not Disturb alerts appear inside the media pill, between the album art and the waveform (briefly replacing the lyric line), and the pill stretches to fit them. A running focus timer or progress task gets its own Activity tab at the end of the scroll loop instead.
 - **Minimize:** The button left of "previous" on the media card tucks the island away into a thin glass line with a faint live waveform. Hover the line to open the full island; click the button again to bring the normal pill back. Alerts such as volume or notifications still pop out while minimized.
 - **Switch player:** When more than one app is playing media (say Spotify and a YouTube tab), small arrows appear beside the elapsed and remaining times on the media card. Click them to choose which player the island shows and controls. The choice holds until that player closes.
 - **Right-Click Menu:** Right-click the island to access Theme presets, Transparency settings, and to pin the island open.
@@ -326,6 +326,9 @@ We love community contributions! To ensure high-quality updates, please follow t
   - Volume: true
     $name: Volume slider flyout
     $description: Shows a volume slider banner on the island when adjusting system volume. While on, the island handles the volume keys itself and the Windows volume flyout stays hidden (it comes back when this is disabled or the mod is turned off).
+  - Brightness: true
+    $name: Brightness slider flyout
+    $description: Shows a brightness banner on the island when the built-in display's brightness changes (brightness keys, the Settings slider). While on, the Windows brightness flyout is hidden as it appears (it comes back when this is disabled or the mod is turned off). Built-in laptop panels only; external monitors do not report their brightness to Windows.
   - CapsLock: true
     $name: Caps Lock module
     $description: Shows an indicator when Caps Lock or Num Lock state changes.
@@ -491,6 +494,7 @@ We love community contributions! To ensure high-quality updates, please follow t
 #include <winhttp.h>
 #include <pdh.h>
 #include <pdhmsg.h>
+#include <wbemidl.h>
 
 #include <algorithm>
 #include <array>
@@ -843,6 +847,7 @@ enum class IslandKind {
     Clipboard,
     Notification,
     Volume,
+    Brightness,
     BatteryLow,
     CapsLock,
     Device,
@@ -1017,6 +1022,7 @@ struct Settings {
     bool battery = true;
     bool progress = true;
     bool volume = true;
+    bool brightness = true;
     CalendarAccentMode calendarAccent = CalendarAccentMode::Red;
     bool privacyDots = true;
     bool privacyDotsMic = true;
@@ -1192,6 +1198,12 @@ struct VolumeSnapshot {
     double expiresAt = 0.0;
 };
 
+struct BrightnessSnapshot {
+    bool active = false;
+    int percent = 0;
+    double expiresAt = 0.0;
+};
+
 struct CapsLockSnapshot {
     bool active = false;
     bool capsOn = false;
@@ -1304,6 +1316,7 @@ struct SharedState {
     ClipboardSnapshot clipboard;
     NotificationSnapshot notification;
     VolumeSnapshot volume;
+    BrightnessSnapshot brightness;
     CapsLockSnapshot capsLock;
     TimerSnapshot timer;
     DeviceSnapshot device;
@@ -1646,6 +1659,7 @@ const wchar_t* Loc(const wchar_t* english) {
         {L"File Tray", {nullptr, L"Bac à fichiers", L"Bandeja de archivos", L"Dateiablage", L"Bandeja de arquivos", L"Vassoio file", L"Файлы", L"Dosya Tepsisi", L"फ़ाइल ट्रे", L"文件托盘", L"ファイル トレイ", L"파일 트레이"}},
         {L"Bluetooth", {nullptr, L"Bluetooth", L"Bluetooth", L"Bluetooth", L"Bluetooth", L"Bluetooth", L"Bluetooth", L"Bluetooth", L"ब्लूटूथ", L"蓝牙", L"Bluetooth", L"블루투스"}},
         {L"Copied", {nullptr, L"Copié", L"Copiado", L"Kopiert", L"Copiado", L"Copiato", L"Скопировано", L"Kopyalandı", L"कॉपी किया गया", L"已复制", L"コピーしました", L"복사됨"}},
+        {L"Brightness", {nullptr, L"Luminosité", L"Brillo", L"Helligkeit", L"Brilho", L"Luminosità", L"Яркость", L"Parlaklık", L"चमक", L"亮度", L"明るさ", L"밝기"}},
         {L"Volume", {nullptr, L"Volume", L"Volumen", L"Lautstärke", L"Volume", L"Volume", L"Громкость", L"Ses", L"वॉल्यूम", L"音量", L"音量", L"볼륨"}},
         {L"Muted", {nullptr, L"Muet", L"Silenciado", L"Stumm", L"Sem som", L"Muto", L"Без звука", L"Sessiz", L"म्यूट", L"已静音", L"ミュート", L"음소거"}},
         {L"Low Battery", {nullptr, L"Batterie faible", L"Batería baja", L"Akku schwach", L"Bateria fraca", L"Batteria scarica", L"Батарея разряжена", L"Pil Az", L"बैटरी कम", L"电量低", L"バッテリー残量低下", L"배터리 부족"}},
@@ -2289,6 +2303,11 @@ void LoadSettings() {
         std::lock_guard lock(g_stateMutex);
         g_state.volume.active = false;
     }
+    next.brightness = Wh_GetIntSetting(L"Modules.Brightness") != 0;
+    if (!next.brightness) {
+        std::lock_guard lock(g_stateMutex);
+        g_state.brightness.active = false;
+    }
     next.clipboard = Wh_GetIntSetting(L"Modules.Clipboard") != 0;
     next.statusCountdownProgress = Wh_GetIntSetting(L"Modules.StatusCountdownProgress") != 0;
 
@@ -2648,9 +2667,10 @@ void LoadSettings() {
         std::lock_guard lock(g_settingsMutex);
         cityChanged = next.weatherCity != g_settings.weatherCity ||
                       next.weatherUseLocation != g_settings.weatherUseLocation;
-        // The keyboard hook also intercepts the volume keys, so it depends on
-        // the Volume module as well.
-        capsLockChanged = next.capsLock != g_settings.capsLock || next.volume != g_settings.volume;
+        // The keyboard hook also intercepts the volume keys and notes the
+        // brightness keys, so it depends on those modules as well.
+        capsLockChanged = next.capsLock != g_settings.capsLock || next.volume != g_settings.volume ||
+                          next.brightness != g_settings.brightness;
         hotkeySettingChanged =
             next.hideShowHotkeyEnabled != g_settings.hideShowHotkeyEnabled ||
             next.hideShowModifiers != g_settings.hideShowModifiers ||
@@ -7123,6 +7143,347 @@ void ApplyVolumeKey(UINT vk) {
     }
 }
 
+// ── Brightness (built-in panel) ──────────────────────────────────────────────
+//
+// The brightness keys cannot be handled like the volume keys. On laptops they
+// are firmware hotkeys: the panel brightness has already changed by the time
+// anything reaches Windows, and the shell raises its brightness OSD (an
+// XamlExplorerHostIslandWindow in explorer.exe, the same host as the volume
+// flyout) in response to the *change*, not to a key. Swallowing the key event
+// some keyboards also send (on an HP Victus: vk 0xFF, scan 0x2B, extended, for
+// both directions) changes neither.
+//
+// So the module works from the change itself:
+// - BrightnessThreadProc waits on WMI's WmiMonitorBrightnessEvent (root\WMI),
+//   which fires for the keys, the Settings slider and anything else, and raises
+//   the island's brightness pill.
+// - BrightnessOsdThreadProc watches explorer for windows being shown and hides
+//   the OSD when it appears right after a brightness change.
+//
+// At 0% / 100% a further press changes nothing, so no WMI event comes, yet the
+// shell still shows its OSD. For that case the hook remembers the scan code of
+// the unmapped (vk 0xFF) key that arrived just before a real brightness change,
+// and treats a later press of that same key as a brightness press too.
+//
+// External monitors do not report brightness to WMI, so without a built-in
+// panel both threads simply exit and the shell's OSD is left alone.
+
+HANDLE g_brightnessThread = nullptr;
+HANDLE g_brightnessOsdThread = nullptr;
+std::atomic<int> g_lastBrightness = -1;
+std::atomic<ULONGLONG> g_lastBrightnessEventMs = 0;
+// Last unmapped (vk 0xFF) key press, as scan | extended << 8, and when.
+std::atomic<int> g_lastUnmappedKeyScan = -1;
+std::atomic<ULONGLONG> g_lastUnmappedKeyMs = 0;
+// The unmapped key learned to be a brightness key, or -1 until one is seen.
+std::atomic<int> g_brightnessKeyScan = -1;
+// An OSD-like window explorer showed that could not be tied to a brightness
+// change yet; hidden if the WMI event follows shortly after.
+std::atomic<HWND> g_pendingBrightnessOsd = nullptr;
+std::atomic<ULONGLONG> g_pendingBrightnessOsdMs = 0;
+
+constexpr ULONGLONG kBrightnessOsdWindowMs = 1500;  // change <-> OSD pairing window
+constexpr ULONGLONG kBrightnessKeyLearnMs = 400;    // key -> WMI event, to learn the key
+constexpr ULONGLONG kBrightnessKeyHintMs = 800;     // learned key -> OSD
+
+// Called from the keyboard hook: a plain atomic store, nothing more.
+void NoteUnmappedKey(DWORD scanCode, DWORD flags) {
+    g_lastUnmappedKeyScan.store(static_cast<int>((scanCode & 0xFF) | ((flags & LLKHF_EXTENDED) ? 0x100 : 0)),
+                                std::memory_order_relaxed);
+    g_lastUnmappedKeyMs.store(GetTickCount64(), std::memory_order_relaxed);
+}
+
+bool BrightnessKeyRecentlyPressed(ULONGLONG nowMs) {
+    const int learned = g_brightnessKeyScan.load(std::memory_order_relaxed);
+    return learned >= 0 && g_lastUnmappedKeyScan.load(std::memory_order_relaxed) == learned &&
+           nowMs - g_lastUnmappedKeyMs.load(std::memory_order_relaxed) < kBrightnessKeyHintMs;
+}
+
+// Records a brightness change and raises the brightness pill.
+void ReportBrightnessChange(int percent) {
+    if (!g_settings.brightness) {
+        return;
+    }
+    {
+        std::lock_guard lock(g_stateMutex);
+        g_state.brightness.active = true;
+        g_state.brightness.percent = ClampInt(percent, 0, 100);
+        g_state.brightness.expiresAt = NowSeconds() + 1.8;
+    }
+    g_layoutDirty = true;
+    TriggerNudge();  // also wakes a parked (auto-hidden) island
+}
+
+ComPtr<IWbemServices> ConnectWmiNamespace(const wchar_t* ns) {
+    ComPtr<IWbemLocator> locator;
+    if (FAILED(CoCreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&locator)))) {
+        return nullptr;
+    }
+    ComPtr<IWbemServices> services;
+    BSTR nsBstr = SysAllocString(ns);
+    const HRESULT hr = locator->ConnectServer(nsBstr, nullptr, nullptr, nullptr, 0, nullptr, nullptr, &services);
+    SysFreeString(nsBstr);
+    if (FAILED(hr) || !services) {
+        return nullptr;
+    }
+    CoSetProxyBlanket(services.Get(), RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, RPC_C_AUTHN_LEVEL_CALL,
+                      RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
+    return services;
+}
+
+// Reads an integer property (the brightness ones are uint8) from a WMI object.
+int WmiIntProperty(IWbemClassObject* object, const wchar_t* name) {
+    VARIANT value;
+    VariantInit(&value);
+    int result = -1;
+    if (SUCCEEDED(object->Get(name, 0, &value, nullptr, nullptr)) &&
+        SUCCEEDED(VariantChangeType(&value, &value, 0, VT_I4))) {
+        result = value.lVal;
+    }
+    VariantClear(&value);
+    return result;
+}
+
+// Current brightness of the active built-in panel, or -1 when there is none.
+int QueryPanelBrightness(IWbemServices* services) {
+    if (!services) {
+        return -1;
+    }
+    BSTR language = SysAllocString(L"WQL");
+    BSTR query = SysAllocString(L"SELECT CurrentBrightness FROM WmiMonitorBrightness WHERE Active = TRUE");
+    ComPtr<IEnumWbemClassObject> results;
+    const HRESULT hr = services->ExecQuery(language, query, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                                           nullptr, &results);
+    SysFreeString(language);
+    SysFreeString(query);
+    if (FAILED(hr) || !results) {
+        return -1;
+    }
+    ComPtr<IWbemClassObject> object;
+    ULONG returned = 0;
+    if (FAILED(results->Next(2000, 1, &object, &returned)) || returned == 0 || !object) {
+        return -1;
+    }
+    return WmiIntProperty(object.Get(), L"CurrentBrightness");
+}
+
+void HideBrightnessOsd(HWND hwnd, const wchar_t* reason) {
+    // Async: explorer owns the window, and a synchronous cross-process call
+    // could stall this thread on a busy shell.
+    ShowWindowAsync(hwnd, SW_HIDE);
+    // Once per OSD appearance at most, so no rate limit is needed.
+    Wh_Log(L"Brightness: hid the Windows brightness flyout (%s)", reason);
+}
+
+DWORD WINAPI BrightnessThreadProc(void*) {
+    const HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    ComPtr<IWbemServices> services = ConnectWmiNamespace(L"ROOT\\WMI");
+    const int initial = QueryPanelBrightness(services.Get());
+    ComPtr<IEnumWbemClassObject> events;
+    if (initial < 0) {
+        Wh_Log(L"Brightness: no built-in panel reports brightness; module idle");
+    } else {
+        g_lastBrightness = initial;
+        BSTR language = SysAllocString(L"WQL");
+        BSTR query = SysAllocString(L"SELECT * FROM WmiMonitorBrightnessEvent");
+        if (FAILED(services->ExecNotificationQuery(language, query,
+                                                   WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                                                   nullptr, &events))) {
+            events.Reset();
+            Wh_Log(L"Brightness: could not subscribe to WmiMonitorBrightnessEvent");
+        }
+        SysFreeString(language);
+        SysFreeString(query);
+    }
+
+    // Next() blocks until an event arrives or the timeout passes; the timeout
+    // only exists so the stop event is noticed.
+    while (events && WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
+        ComPtr<IWbemClassObject> event;
+        ULONG returned = 0;
+        const HRESULT hr = events->Next(1000, 1, &event, &returned);
+        if (hr == WBEM_S_TIMEDOUT || returned == 0 || !event) {
+            if (FAILED(hr)) {
+                Wh_Log(L"Brightness: event wait failed (0x%08X)", static_cast<unsigned>(hr));
+                break;
+            }
+            continue;
+        }
+
+        const int percent = WmiIntProperty(event.Get(), L"Brightness");
+        if (percent < 0) {
+            continue;
+        }
+        const ULONGLONG nowMs = GetTickCount64();
+        g_lastBrightness = percent;
+        g_lastBrightnessEventMs = nowMs;
+
+        // An unmapped key just before the change is the brightness key.
+        const int keyScan = g_lastUnmappedKeyScan.load(std::memory_order_relaxed);
+        if (keyScan >= 0 && nowMs - g_lastUnmappedKeyMs.load(std::memory_order_relaxed) < kBrightnessKeyLearnMs &&
+            g_brightnessKeyScan.exchange(keyScan) != keyScan) {
+            Wh_Log(L"Brightness: learned brightness key scan=0x%X", static_cast<unsigned>(keyScan));
+        }
+
+        ReportBrightnessChange(percent);
+
+        // The OSD may have been shown before this event arrived.
+        if (g_settings.brightness) {
+            // Taken after stamping the event time above (see
+            // BrightnessOsdShown for why the order matters). The pending
+            // window can be newer than nowMs, so compare against a fresh
+            // tick: a plain nowMs - pendingMs would wrap around.
+            HWND pending = g_pendingBrightnessOsd.exchange(nullptr);
+            const ULONGLONG pendingMs = g_pendingBrightnessOsdMs.load();
+            const ULONGLONG checkMs = GetTickCount64();
+            if (pending && checkMs >= pendingMs && checkMs - pendingMs < kBrightnessOsdWindowMs &&
+                IsWindowVisible(pending)) {
+                HideBrightnessOsd(pending, L"after change");
+            }
+        }
+    }
+
+    events.Reset();
+    services.Reset();
+    if (SUCCEEDED(hrCo)) {
+        CoUninitialize();
+    }
+    return 0;
+}
+
+DWORD ShellProcessId() {
+    DWORD pid = 0;
+    if (HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr)) {
+        GetWindowThreadProcessId(tray, &pid);
+    }
+    return pid;
+}
+
+// The shell's OSD: a small XamlExplorerHostIslandWindow. Alt+Tab and other
+// shell surfaces use the same class, but they are far larger.
+bool LooksLikeShellOsd(HWND hwnd) {
+    wchar_t className[64] = {};
+    if (GetClassNameW(hwnd, className, ARRAYSIZE(className)) <= 0 ||
+        wcscmp(className, L"XamlExplorerHostIslandWindow") != 0) {
+        return false;
+    }
+    RECT rect = {};
+    MONITORINFO monitor = {sizeof(monitor)};
+    if (!GetWindowRect(hwnd, &rect) ||
+        !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) {
+        return false;
+    }
+    const LONG width = rect.right - rect.left;
+    const LONG height = rect.bottom - rect.top;
+    const LONG monitorWidth = monitor.rcMonitor.right - monitor.rcMonitor.left;
+    const LONG monitorHeight = monitor.rcMonitor.bottom - monitor.rcMonitor.top;
+    return width > 0 && height > 0 && width <= monitorWidth / 3 && height <= monitorHeight / 5;
+}
+
+// Only touched by the OSD thread (the WinEvent callback runs on it).
+ComPtr<IWbemServices> g_brightnessOsdWmi;
+
+void CALLBACK BrightnessOsdShown(HWINEVENTHOOK, DWORD, HWND hwnd, LONG idObject, LONG, DWORD, DWORD) {
+    if (!hwnd || idObject != OBJID_WINDOW || !g_settings.brightness || !LooksLikeShellOsd(hwnd)) {
+        return;
+    }
+    const ULONGLONG nowMs = GetTickCount64();
+
+    // Publish the window as pending *before* looking at the WMI side.
+    // BrightnessThreadProc does the mirror image (stamps the event time, then
+    // takes the pending window), so with both orders sequentially consistent
+    // at least one side always sees the other. Checking first and publishing
+    // afterwards lost the race whenever the event landed in between: neither
+    // side hid the OSD, so the first press after the flyout had closed still
+    // showed it (the next press then hid the stale pending window).
+    g_pendingBrightnessOsdMs = nowMs;
+    g_pendingBrightnessOsd = hwnd;
+
+    // The WMI event already came in, or the learned brightness key was pressed
+    // (at 0% / 100%, where nothing changes and no event comes).
+    const ULONGLONG sinceEvent = nowMs - g_lastBrightnessEventMs.load();
+    const bool keyHint = BrightnessKeyRecentlyPressed(nowMs);
+    int current = -1;
+    bool changed = false;
+    if (sinceEvent >= kBrightnessOsdWindowMs && !keyHint) {
+        // The event may simply not be here yet: read the level now.
+        if (!g_brightnessOsdWmi) {
+            g_brightnessOsdWmi = ConnectWmiNamespace(L"ROOT\\WMI");
+        }
+        current = QueryPanelBrightness(g_brightnessOsdWmi.Get());
+        changed = current >= 0 && current != g_lastBrightness.exchange(current);
+    }
+    // Re-read: the event may have arrived during the query.
+    const bool recentEvent = GetTickCount64() - g_lastBrightnessEventMs.load() < kBrightnessOsdWindowMs;
+
+    Wh_Log(L"Brightness: shell OSD shown, sinceEvent=%llums key=%d query=%d changed=%d -> %s",
+           sinceEvent, keyHint ? 1 : 0, current, changed ? 1 : 0,
+           (recentEvent || keyHint || changed) ? L"hide" : L"left pending");
+
+    if (!(recentEvent || keyHint || changed)) {
+        // Not (yet) a brightness change, e.g. the volume flyout with the
+        // Volume module off. Left alone; a WMI event arriving shortly claims
+        // the pending window.
+        return;
+    }
+    HWND expected = hwnd;  // compare_exchange overwrites its first argument
+    g_pendingBrightnessOsd.compare_exchange_strong(expected, nullptr);
+    HideBrightnessOsd(hwnd, changed ? L"level changed" : keyHint ? L"brightness key" : L"recent change");
+    if (changed) {
+        ReportBrightnessChange(current);
+    } else if (keyHint && !recentEvent) {
+        const int percent = g_lastBrightness.load(std::memory_order_relaxed);
+        if (percent >= 0) {
+            ReportBrightnessChange(percent);
+        }
+    }
+}
+
+DWORD WINAPI BrightnessOsdThreadProc(void*) {
+    const HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    // Only meaningful with a built-in panel (see BrightnessThreadProc).
+    bool supported = QueryPanelBrightness(ConnectWmiNamespace(L"ROOT\\WMI").Get()) >= 0;
+
+    HWINEVENTHOOK hook = nullptr;
+    DWORD hookedPid = 0;
+    while (supported) {
+        // Hooked to explorer only, so the callback sees nothing else, and
+        // re-hooked when explorer restarts or the module is toggled.
+        const DWORD shellPid = g_settings.brightness ? ShellProcessId() : 0;
+        if (shellPid != hookedPid) {
+            if (hook) {
+                UnhookWinEvent(hook);
+                hook = nullptr;
+            }
+            if (shellPid != 0) {
+                hook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, nullptr, BrightnessOsdShown, shellPid,
+                                       0, WINEVENT_OUTOFCONTEXT);
+            }
+            hookedPid = hook ? shellPid : 0;
+        }
+
+        const DWORD wait = MsgWaitForMultipleObjects(1, &g_stopEvent, FALSE, 5000, QS_ALLINPUT);
+        if (wait == WAIT_OBJECT_0 || wait == WAIT_FAILED) {
+            break;
+        }
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            DispatchMessageW(&msg);
+        }
+    }
+
+    if (hook) {
+        UnhookWinEvent(hook);
+    }
+    g_brightnessOsdWmi.Reset();
+    if (SUCCEEDED(hrCo)) {
+        CoUninitialize();
+    }
+    return 0;
+}
+
 // ---- Privacy indicator helpers ----
 std::wstring CleanActiveAppName(const std::wstring& raw) {
     std::wstring name;
@@ -9102,6 +9463,9 @@ class Renderer {
                 break;
             case IslandKind::Volume:
                 DrawVolume(state, unscaledRect);
+                break;
+            case IslandKind::Brightness:
+                DrawBrightness(state, unscaledRect);
                 break;
             case IslandKind::CapsLock:
                 DrawCapsLock(state, unscaledRect);
@@ -11566,6 +11930,12 @@ class Renderer {
                 }
                 break;
             }
+            case IslandKind::Brightness:
+                c.glyph = L"\uE706";
+                c.hasBar = true;
+                c.barValue = Clamp(state.brightness.percent / 100.0f, 0.0f, 1.0f);
+                c.secondary = std::to_wstring(state.brightness.percent) + L"%";
+                break;
             case IslandKind::CapsLock: {
                 const bool num = state.capsLock.isNumEvent;
                 const bool on = num ? state.capsLock.numOn : state.capsLock.capsOn;
@@ -12692,8 +13062,24 @@ class Renderer {
     }
 
     void DrawVolume(const SharedState& state, D2D1_RECT_F rect) {
-        if (rect.bottom - rect.top < 24.0f || rect.right - rect.left < 140.0f) return;
         const bool muted = state.volume.muted || state.volume.percent == 0;
+        const wchar_t* glyph = muted ? L"\uE74F" : (usingFluentIcons_ ? L"\uE767" : L"\uE993");
+        const std::wstring label =
+            state.volume.deviceName.empty() ? std::wstring(Loc(L"Volume")) : state.volume.deviceName;
+        DrawLevelPill(rect, glyph, label, state.volume.percent, muted);
+    }
+
+    // Same banner as the volume one, so the brightness keys feel the same.
+    // Brightness has no mute, so a level of 0 still shows as "0%".
+    void DrawBrightness(const SharedState& state, D2D1_RECT_F rect) {
+        DrawLevelPill(rect, L"\uE706", Loc(L"Brightness"), state.brightness.percent, false);
+    }
+
+    // Icon badge, label, value and an accent level track. Shared by the volume
+    // and brightness banners.
+    void DrawLevelPill(D2D1_RECT_F rect, const wchar_t* glyph, const std::wstring& deviceLabel,
+                       int percent, bool muted) {
+        if (rect.bottom - rect.top < 24.0f || rect.right - rect.left < 140.0f) return;
         const float cy = (rect.top + rect.bottom) * 0.5f;
         const float badgeSz = (rect.bottom - rect.top) - 16.0f;
         D2D1_RECT_F badge = D2D1::RectF(rect.left + 14, cy - badgeSz * 0.5f,
@@ -12704,7 +13090,6 @@ class Renderer {
         target_->CreateSolidColorBrush(material_.raisedStrong, &badgeBg);
         target_->FillRoundedRectangle(D2D1::RoundedRect(badge, br, br), badgeBg.Get());
 
-        const wchar_t* glyph = muted ? L"\uE74F" : (usingFluentIcons_ ? L"\uE767" : L"\uE993");
         textBrush_->SetOpacity(0.95f);
 
         if (iconFormat_) {
@@ -12721,8 +13106,6 @@ class Renderer {
         const float tx = badge.right + 14;
         D2D1_RECT_F labelRect = D2D1::RectF(tx, cy - 13.0f, rect.right - 58, cy + 3.0f);
         mutedBrush_->SetOpacity(0.50f);
-        const std::wstring deviceLabel =
-            state.volume.deviceName.empty() ? std::wstring(Loc(L"Volume")) : state.volume.deviceName;
         target_->DrawTextW(deviceLabel.c_str(), static_cast<UINT32>(deviceLabel.size()),
                            smallTextFormat_.Get(), labelRect, mutedBrush_.Get(),
                            D2D1_DRAW_TEXT_OPTIONS_CLIP);
@@ -12731,7 +13114,7 @@ class Renderer {
         if (muted) {
             wcscpy_s(value, ARRAYSIZE(value), Loc(L"Muted"));
         } else {
-            swprintf_s(value, L"%d%%", state.volume.percent);
+            swprintf_s(value, L"%d%%", percent);
         }
         D2D1_RECT_F valueRect = D2D1::RectF(rect.right - 58, cy - 13.0f, rect.right - 14, cy + 3.0f);
         target_->DrawTextW(value, static_cast<UINT32>(wcslen(value)), smallTextFormat_.Get(),
@@ -12740,7 +13123,7 @@ class Renderer {
 
         D2D1_RECT_F track = D2D1::RectF(tx, cy + 7.0f, rect.right - 14, cy + 12.0f);
         // Shared accent track, so the volume bar matches the media scrubber.
-        const float pct = Clamp(state.volume.percent / 100.0f, 0.0f, 1.0f);
+        const float pct = Clamp(percent / 100.0f, 0.0f, 1.0f);
         if (muted) {
             // Muted still shows the level, just drained of colour.
             ComPtr<ID2D1SolidColorBrush> trackBrush;
@@ -13485,6 +13868,7 @@ Activity ActivityForKind(IslandKind kind, const Settings& settings, const Shared
             activity.height = 58.0f;
             break;
         case IslandKind::Volume:
+        case IslandKind::Brightness:
             activity.width = 300.0f;
             activity.height = 54.0f;
             break;
@@ -13551,6 +13935,9 @@ IslandKind ChooseInlineAlert(const SharedState& state, const Settings& settings,
         return IslandKind::DoNotDisturb;
     }
     if (settings.volume && state.volume.active && now < state.volume.expiresAt) return IslandKind::Volume;
+    if (settings.brightness && state.brightness.active && now < state.brightness.expiresAt) {
+        return IslandKind::Brightness;
+    }
     if (state.notification.active && now < state.notification.expiresAt) return IslandKind::Notification;
     if (settings.battery && state.battery.active && now < state.battery.expiresAt) return IslandKind::BatteryLow;
     if (settings.timerEnabled && state.timer.justFinished && now < state.timer.finishedExpiresAt) {
@@ -13596,6 +13983,9 @@ std::vector<IslandKind> ChooseActivities(const SharedState& state, const Setting
     }
     if (settings.volume && state.volume.active && now < state.volume.expiresAt) {
         activities.push_back(IslandKind::Volume);
+    }
+    if (settings.brightness && state.brightness.active && now < state.brightness.expiresAt) {
+        activities.push_back(IslandKind::Brightness);
     }
     if (state.notification.active && now < state.notification.expiresAt) {
         activities.push_back(IslandKind::Notification);
@@ -13653,6 +14043,11 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
         auto* volumeKbd = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
         const DWORD vk = volumeKbd->vkCode;
+        // Firmware hotkeys such as brightness arrive without a virtual key.
+        // Only noted (passed through untouched) for the brightness module.
+        if (vk == 0xFF && g_settings.brightness && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
+            NoteUnmappedKey(volumeKbd->scanCode, volumeKbd->flags);
+        }
         if (vk == VK_VOLUME_UP || vk == VK_VOLUME_DOWN || vk == VK_VOLUME_MUTE) {
             HWND hwnd = g_hwnd;
             // A manually hidden island cannot show its pill, so the keys go
@@ -13683,10 +14078,10 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 // A system-wide WH_KEYBOARD_LL puts this process on the path of every keystroke
 // on the desktop, so it is only installed while it has something to do: notice
-// Caps Lock and Num Lock for the indicator pill, or take over the volume keys
-// for the Volume module.
+// Caps Lock and Num Lock for the indicator pill, take over the volume keys
+// for the Volume module, or note the brightness keys for the Brightness module.
 static bool KeyboardHookWanted() {
-    return g_settings.capsLock || g_settings.volume;
+    return g_settings.capsLock || g_settings.volume || g_settings.brightness;
 }
 
 // Wakes the keyboard thread so it re-evaluates whether the hook is needed.
@@ -14833,6 +15228,10 @@ DWORD WINAPI RenderThreadProc(void*) {
                 g_state.volume.active = false;
                 snapshot.volume.active = false;
             }
+            if (g_state.brightness.active && now >= g_state.brightness.expiresAt) {
+                g_state.brightness.active = false;
+                snapshot.brightness.active = false;
+            }
             if (g_state.capsLock.active && now >= g_state.capsLock.expiresAt) {
                 g_state.capsLock.active = false;
                 snapshot.capsLock.active = false;
@@ -14876,18 +15275,23 @@ DWORD WINAPI RenderThreadProc(void*) {
         }
         // Over a full-screen video the island shrinks to the minimized line at
         // the screen edge. Hovering the line opens the card, as in minimized
-        // mode, but pin does not and no alerts surface -- except a volume
-        // change (the Windows OSD is suppressed, so this is the only feedback).
+        // mode, but pin does not and no alerts surface -- except a volume or
+        // brightness change (the Windows OSDs are suppressed, so this is the
+        // only feedback).
         // The privacy dot shows on the line itself.
         const bool videoSuppressed =
             isFullscreen && !g_fullscreenOverrideVisible.load(std::memory_order_relaxed);
         const bool volumeAlertActive =
             g_settings.volume && snapshot.volume.active && now < snapshot.volume.expiresAt;
+        const bool brightnessAlertActive =
+            g_settings.brightness && snapshot.brightness.active && now < snapshot.brightness.expiresAt;
 
         // Short alert drawn inside the media pill, if any (see ChooseInlineAlert).
         const IslandKind inlineAlert =
             (primary.kind != IslandKind::Media) ? IslandKind::Idle
-            : videoSuppressed ? (volumeAlertActive ? IslandKind::Volume : IslandKind::Idle)
+            : videoSuppressed ? (volumeAlertActive       ? IslandKind::Volume
+                                 : brightnessAlertActive ? IslandKind::Brightness
+                                                         : IslandKind::Idle)
                               : ChooseInlineAlert(snapshot, g_settings, now);
         const bool hasInlineAlert = inlineAlert != IslandKind::Idle;
         renderer.SetInlineAlert(inlineAlert);
@@ -14971,6 +15375,7 @@ DWORD WINAPI RenderThreadProc(void*) {
         bool isTransientAlert = (primary.kind == IslandKind::Clipboard ||
                                  primary.kind == IslandKind::Notification ||
                                  primary.kind == IslandKind::Volume ||
+                                 primary.kind == IslandKind::Brightness ||
                                  primary.kind == IslandKind::BatteryLow ||
                                  primary.kind == IslandKind::CapsLock ||
                                  primary.kind == IslandKind::Device ||
@@ -14979,9 +15384,10 @@ DWORD WINAPI RenderThreadProc(void*) {
                                  hasInlineAlert ||
                                  recentTrackChange);
         if (videoSuppressed) {
-            // Only a volume change gets through (the inline alert is already
-            // narrowed to volume above).
-            isTransientAlert = primary.kind == IslandKind::Volume || hasInlineAlert;
+            // Only a volume or brightness change gets through (the inline
+            // alert is already narrowed to those above).
+            isTransientAlert = primary.kind == IslandKind::Volume ||
+                               primary.kind == IslandKind::Brightness || hasInlineAlert;
         }
 
         const bool unhideGraceActive = (now < g_hotkeyUnhideUntil.load());
@@ -15637,6 +16043,8 @@ bool StartThreads() {
     g_lyricsThread = CreateThread(nullptr, 0, LyricsThreadProc, nullptr, 0, nullptr);
     g_artworkThread = CreateThread(nullptr, 0, ArtworkThreadProc, nullptr, 0, nullptr);
     g_volumeWatcherThread = CreateThread(nullptr, 0, VolumeWatcherThreadProc, nullptr, 0, nullptr);
+    g_brightnessThread = CreateThread(nullptr, 0, BrightnessThreadProc, nullptr, 0, nullptr);
+    g_brightnessOsdThread = CreateThread(nullptr, 0, BrightnessOsdThreadProc, nullptr, 0, nullptr);
     g_keyboardThread = CreateThread(nullptr, 0, KeyboardThreadProc, nullptr, 0, &g_keyboardThreadId);
     g_mouseThread = CreateThread(nullptr, 0, MouseThreadProc, nullptr, 0, &g_mouseThreadId);
 #if DYNAMIC_ISLAND_HAS_USER_NOTIFICATION_LISTENER
@@ -15660,7 +16068,7 @@ void StopThreads() {
         SetEvent(g_stopEvent);
     }
 
-    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_lyricsThread, g_artworkThread, g_volumeWatcherThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread};
+    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_lyricsThread, g_artworkThread, g_volumeWatcherThread, g_brightnessThread, g_brightnessOsdThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread};
     for (HANDLE handle : handles) {
         if (handle) {
             WaitForSingleObject(handle, 3000);
@@ -15675,6 +16083,8 @@ void StopThreads() {
     g_lyricsThread = nullptr;
     g_artworkThread = nullptr;
     g_volumeWatcherThread = nullptr;
+    g_brightnessThread = nullptr;
+    g_brightnessOsdThread = nullptr;
     g_notificationThread = nullptr;
     g_keyboardThread = nullptr;
     g_keyboardThreadId = 0;
