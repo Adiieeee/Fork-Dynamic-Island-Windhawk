@@ -30,7 +30,7 @@ This is a fork of [devcode90/Dynamic-Island-for-Windows](https://github.com/devc
 
 - **Mod id:** `dynamic-island-for-windows-fork`
 - **Version:** 1.7.12
-- **License:** MIT
+- **License:** [MIT](LICENSE)
 - **Technical reference:** [DOCUMENTATION.md](DOCUMENTATION.md) explains how each feature should behave, where its code lives, and which Windows APIs it uses. Use it when something breaks after a Windows update.
 
 ---
@@ -101,7 +101,6 @@ Depending on what's happening, the pill turns into:
 - The island hides immediately while the screenshot overlay (Win+Shift+S / PrtSc) is open.
 - Clicks no longer get "eaten" when opening the card from the minimize line.
 - Weather refreshes correctly after the location setting changes or the PC resumes from sleep.
-- The original game overlay was removed. Its FPS counter measured the island's own redraw rate, not the game's, so CPU/RAM/GPU/disk monitoring now lives only in the Hardware tab.
 
 See the [changelog in DOCUMENTATION.md](DOCUMENTATION.md#16-fork-changelog) for per-version details.
 

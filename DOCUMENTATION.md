@@ -471,7 +471,6 @@ While expanded (hover or pin), tabs are switched with the mouse wheel or a horiz
 ## 11. Feature: Idle strip, Privacy, Timer
 
 - **Idle strip** (no music and no notifications): clock and weather. Width is measured from the text via `MeasureIdleStrip` (±7860) and drawn by `DrawIdleDashboard` (±9924). Settings: `ClockFormat`, `ShowSeconds`, `DateFormat`, `DateFirst`.
-- **Game overlay (removed in 1.7.12):** the original mod could replace the idle strip with FPS/CPU/GPU/RAM/disk cards. The FPS was the island's own render rate, not the game's, so the feature was removed along with its settings (`GameOverlay`, `GameOverlayShow*`, `GameOverlayCompact`, `ShowMetricText`), its menu item and the `GameOverlayPinned` value. Hardware figures are shown only on the Hardware tab (§10).
 - **Privacy:**
   - `UpdatePrivacyIndicators` (±6607) and `IsDeviceActiveViaRegistry` (±6527) read the registry `HKCU`/`HKLM\...\CapabilityAccessManager\ConsentStore\{microphone|webcam}`: an app currently using the device has `LastUsedTimeStop = 0`.
   - Orange dot for the microphone and green for the camera, drawn by `DrawPrivacyDots` (±8597), or at the end of the minimize line.
@@ -517,7 +516,7 @@ While expanded (hover or pin), tabs are switched with the mouse wheel or a horiz
     - Since 1.7.4 this line isn't affected by idle auto-hide (`isHidden = false`), same as manual minimize, so it can always be hovered.
     - `EnsureTopmost` keeps running so the line stays above the player.
   - The hide/show hotkey forces the normal island (`g_fullscreenOverrideVisible`). This is reset on leaving fullscreen.
-  - `g_isFullscreen` / `isFullscreen` means "fullscreen video". Other gates that use it (HW monitor) are automatically inactive in fullscreen games. `parkedForFullscreen` is now always false (the island is no longer parked during video).
+  - `g_isFullscreen` / `isFullscreen` means "fullscreen video". Other gates that use it (the HW monitor) switch off only during fullscreen video, not in fullscreen games. `parkedForFullscreen` is now always false (the island is no longer parked during video).
 - **Topmost:** `EnsureTopmost` (±2952) reclaims its z-order position every 1 second. When `AlwaysOnTop` is off, the parent is set to Progman.
 - **Click-through:** `SetClickThrough` (±6949) for idle without hover, or temporarily on Ctrl+hover (the island becomes see-through).
 - **Hide/show hotkey:** `ApplyHideShowHotkey` (±2687) calls `RegisterHotKey` on the window thread. Default Ctrl+Alt+D. State is stored in `ManuallyHidden`.
@@ -620,7 +619,6 @@ Use this table to map symptoms to code areas. Every feature above is **target be
 | 1.4.0 | **LRCLIB lyrics** in the collapsed pill (+ toggle, cache, retry); incremental cover reading; **iTunes backup cover**; binary-safe `HttpGet` + timeouts; dynamic pill width following lyrics (0.35-second lead, gaps ≥ 4 seconds return to normal); **Lyrics delay (ms)** setting |
 | 1.5.0 | **Minimize**: glass line + waveform, sits 3px from the screen edge, small hitbox with no delay, hover opens the card |
 | 1.6.0 | **Inline notifications** in the middle of the music pill (no second pill, width follows the notification, max 460); **Activity tab** for Timer/Progress; transient notification duration capped at 3 seconds |
-| 1.7.12 | **Game overlay removed**: its FPS was the island's own render rate, not the game's. Removed `DrawGameOverlay`, `GameOverlayLayout`, the settings `GameOverlay`/`GameOverlayShow*`/`GameOverlayCompact`/`ShowMetricText`, the menu item, `renderFps` and the C:-only `diskFreePercent`; CPU/RAM/GPU/disk now appear only on the Hardware tab |
 | 1.7.11 | **Lyrics no longer go missing when LRCLIB is busy**: `HttpGet` returns the HTTP status; LRCLIB lookups only accept 200/404, retry 503/429 once after 1.5 seconds, and uncertain empty results aren't cached (retry 2/2/2/5/10 seconds then every 20 seconds; while paused only retries n and n+1 still run, the rest wait for playback to resume); per-track log with each request's status |
 | 1.7.10 | **Balanced waveform**: `WaveformAnalyzer` with 6 band-pass filters (frequency-weighted loudness + density of active bands as an estimate of instrument count); auto-gain capped at +8 dB, absolute −60…−10 dBFS scale with a 1.3 curve, so soft music moves but stays small; `DrawWaveform` now radiates from the center to the left and right like the minimize line |
 | 1.7.9 | **More accurate waveform for soft music**: dB scale with auto-gain (`g_waveformRefDb`, 30 dB window, reference floor −45 dB, −70 dB gate) replacing linear `RMS × 4`; one sample per ~10 ms so release and bar spacing match real time; no more false zeros between packets |
