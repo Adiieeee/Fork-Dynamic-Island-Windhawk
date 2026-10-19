@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.7.10
+// @version         1.7.11
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -5647,8 +5647,10 @@ void PushAudioChunks(BYTE* data, UINT32 frames, WAVEFORMATEX* format) {
 }
 
 // --- Weather Fetching Helpers ---
-std::string HttpGet(const wchar_t* host, const wchar_t* path, bool https = true) {
+// `status`, when given, receives the HTTP status code (0 when nothing answered).
+std::string HttpGet(const wchar_t* host, const wchar_t* path, bool https = true, DWORD* status = nullptr) {
     std::string response;
+    if (status) *status = 0;
     HINTERNET hSession = WinHttpOpen(L"DynamicIsland/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) {
         Wh_Log(L"HttpGet: WinHttpOpen failed with error %lu", GetLastError());
@@ -5665,6 +5667,14 @@ std::string HttpGet(const wchar_t* host, const wchar_t* path, bool https = true)
         if (hRequest) {
             if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
                 WinHttpReceiveResponse(hRequest, nullptr)) {
+                if (status) {
+                    DWORD code = 0;
+                    DWORD codeSize = sizeof(code);
+                    if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                            WINHTTP_HEADER_NAME_BY_INDEX, &code, &codeSize, WINHTTP_NO_HEADER_INDEX)) {
+                        *status = code;
+                    }
+                }
                 DWORD size = 0;
                 DWORD downloaded = 0;
                 do {
@@ -6437,21 +6447,43 @@ std::wstring SimplifyTrackTitle(const std::wstring& title) {
     return title.substr(0, cut);
 }
 
-// Result of one LRCLIB lookup. networkFailed means no server answered at all,
-// which is retried later instead of being cached as "this song has no lyrics".
+// Result of one LRCLIB lookup. retryLater means some request got no real answer
+// (timeout, or LRCLIB's frequent 503 "ServerOverloaded" / a 429), so an empty
+// result is not trustworthy: it is retried instead of being cached as "this
+// song has no lyrics". `trace` lists the status codes for the log.
 struct LyricsLookup {
     std::vector<LyricLine> lines;
-    bool networkFailed = false;
+    bool retryLater = false;
+    std::wstring trace;
 };
 
 LyricsLookup FetchLyricsFromLrclib(const std::wstring& title, const std::wstring& artist,
                                    const std::wstring& album, int durationSec) {
     LyricsLookup result;
-    bool anyResponse = false;
+
+    // Only 200 (results) and 404 (no such track) are real answers. A busy
+    // server says "retry in a moment", so one retry is made right away.
+    auto request = [&](const wchar_t* name, const std::wstring& path) {
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            DWORD status = 0;
+            std::string body = HttpGet(L"lrclib.net", path.c_str(), true, &status);
+            result.trace += (result.trace.empty() ? L"" : L", ") + std::wstring(name) + L" " +
+                            std::to_wstring(status);
+            if (status == 200 || status == 404) {
+                return status == 200 ? body : std::string();
+            }
+            if (attempt == 0 && (status == 503 || status == 429) &&
+                WaitForSingleObject(g_stopEvent, 1500) == WAIT_TIMEOUT) {
+                continue;
+            }
+            break;
+        }
+        result.retryLater = true;
+        return std::string();
+    };
 
     auto tryResponse = [&](const std::string& body) {
         if (body.empty()) return false;
-        anyResponse = true;
         size_t from = 0;
         std::string synced;
         while (NextJsonStringField(body, "syncedLyrics", &from, &synced)) {
@@ -6470,7 +6502,7 @@ LyricsLookup FetchLyricsFromLrclib(const std::wstring& title, const std::wstring
                             L"&artist_name=" + PercentEncodeUtf8(artist) +
                             L"&album_name=" + PercentEncodeUtf8(album) +
                             L"&duration=" + std::to_wstring(durationSec);
-        if (tryResponse(HttpGet(L"lrclib.net", path.c_str()))) return result;
+        if (tryResponse(request(L"get", path))) return result;
     }
 
     // Then a looser search, once with the full title and once simplified.
@@ -6480,10 +6512,8 @@ LyricsLookup FetchLyricsFromLrclib(const std::wstring& title, const std::wstring
         if (t->empty() || (t == &simplified && simplified == title)) continue;
         std::wstring path = L"/api/search?track_name=" + PercentEncodeUtf8(*t);
         if (!artist.empty()) path += L"&artist_name=" + PercentEncodeUtf8(artist);
-        if (tryResponse(HttpGet(L"lrclib.net", path.c_str()))) return result;
+        if (tryResponse(request(L"search", path))) return result;
     }
-
-    result.networkFailed = !anyResponse;
     return result;
 }
 
@@ -6496,8 +6526,10 @@ DWORD WINAPI LyricsThreadProc(void*) {
 
     std::wstring pendingKey;      // track seen but not fetched yet
     double pendingSince = 0.0;
-    std::wstring failedKey;       // last track whose fetch hit a network failure
+    std::wstring failedKey;       // last track whose lookup must be retried
     double retryAt = 0.0;
+    int failedAttempts = 0;       // consecutive retries for failedKey
+    int pausedRetries = 0;        // retries for failedKey run during the current pause
 
     while (WaitForSingleObject(g_stopEvent, 500) == WAIT_TIMEOUT) {
         if (!g_lyricsEnabled.load(std::memory_order_relaxed)) {
@@ -6506,6 +6538,7 @@ DWORD WINAPI LyricsThreadProc(void*) {
 
         std::wstring title, artist, album, key;
         int64_t endTicks = 0;
+        bool playing = false;
         {
             std::lock_guard lock(g_stateMutex);
             if (!g_state.media.available) {
@@ -6519,11 +6552,24 @@ DWORD WINAPI LyricsThreadProc(void*) {
             artist = g_state.media.artist;
             album = g_state.media.albumTitle;
             endTicks = g_state.media.endTicks;
+            playing = g_state.media.playing;
         }
 
         const double now = NowSeconds();
-        if (key == failedKey && now < retryAt) {
-            continue;
+        if (key == failedKey) {
+            // A pause lets the retry already due (n) and the one after it
+            // (n+1) still run; from n+2 on they wait until playback resumes.
+            if (playing) {
+                pausedRetries = 0;
+            } else if (pausedRetries >= 2) {
+                continue;
+            }
+            if (now < retryAt) {
+                continue;
+            }
+            if (!playing) {
+                ++pausedRetries;
+            }
         }
 
         auto cached = cache.find(key);
@@ -6555,11 +6601,31 @@ DWORD WINAPI LyricsThreadProc(void*) {
             if (WaitForSingleObject(g_stopEvent, 0) != WAIT_TIMEOUT) {
                 break;
             }
-            if (lookup.networkFailed) {
-                Wh_Log(L"Lyrics: LRCLIB unreachable, retrying in 60s");
+            if (lookup.lines.empty() && lookup.retryLater) {
+                // LRCLIB was busy or unreachable, so "no lyrics" is unproven.
+                // LRCLIB's 503s pass within seconds and a song lasts only a few
+                // minutes, so retry quickly first: 2s, 2s, 2s, 5s, 10s, then
+                // every 20s for as long as the song keeps playing.
+                static constexpr double kRetryDelays[] = {2.0, 2.0, 2.0, 5.0, 10.0, 20.0};
+                constexpr int kLastDelay = static_cast<int>(std::size(kRetryDelays)) - 1;
+                if (key != failedKey) {
+                    failedAttempts = 0;
+                    pausedRetries = 0;
+                } else {
+                    ++failedAttempts;
+                }
                 failedKey = key;
-                retryAt = now + 60.0;
+                const double delay = kRetryDelays[std::min(failedAttempts, kLastDelay)];
+                retryAt = NowSeconds() + delay;  // from when this lookup ended
                 std::lock_guard lock(g_stateMutex);
+                // Paused while this lookup was in flight: it counts as retry n,
+                // so only n+1 still runs before the pause halts retrying.
+                if (playing && !g_state.media.playing && pausedRetries == 0) {
+                    pausedRetries = 1;
+                }
+                Wh_Log(L"Lyrics: LRCLIB busy or unreachable for \"%s\" (%s), retrying in %ds%s", title.c_str(),
+                       lookup.trace.c_str(), static_cast<int>(delay),
+                       !g_state.media.playing && pausedRetries >= 2 ? L" after playback resumes" : L"");
                 if (g_state.lyrics.trackKey == key) {
                     // Clearing the key lets the retry above fire for this track.
                     g_state.lyrics.trackKey.clear();
@@ -6567,6 +6633,13 @@ DWORD WINAPI LyricsThreadProc(void*) {
                 }
                 continue;
             }
+            if (key == failedKey) {
+                failedKey.clear();
+                failedAttempts = 0;
+                pausedRetries = 0;
+            }
+            Wh_Log(L"Lyrics: \"%s\" - %s: %d synced lines (%s)", title.c_str(), artist.c_str(),
+                   static_cast<int>(lookup.lines.size()), lookup.trace.c_str());
             lines = std::move(lookup.lines);
             if (cache.size() >= kCacheMax && !cacheOrder.empty()) {
                 cache.erase(cacheOrder.front());

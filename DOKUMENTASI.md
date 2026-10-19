@@ -54,7 +54,7 @@ Acuan fungsional lengkap untuk `mod.wh.cpp`. Tujuannya: kalau suatu saat mod rus
 "/c/Program Files/Windhawk/Compiler/bin/clang++.exe" -fsyntax-only -Wall -std=c++23 \
   -target x86_64-w64-mingw32 -DWH_MOD -DUNICODE -D_UNICODE \
   -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
-  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.10"' \
+  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.11"' \
   -include windhawk_api.h -x c++ mod.wh.cpp
 ```
 
@@ -272,12 +272,16 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 | `NextJsonStringField` | 5393 | parser string JSON minimal (unescape `\n \" \\ \/ \uXXXX` + surrogate) |
 | `ParseLrc` | 5470 | `[mm:ss.xx] teks`, termasuk beberapa tag per baris; tag metadata diabaikan |
 | `SimplifyTrackTitle` | 5514 | buang " - Remastered", " (feat.", " [" untuk pencarian longgar |
-| `FetchLyricsFromLrclib` | 5530 | `/api/get` (judul, artis, album, durasi) lalu `/api/search` (judul penuh, lalu judul yang disederhanakan) |
-| `LyricsThreadProc` | 5573 | loop 500ms, tunggu durasi ≤ 3 detik, cache 30 lagu, retry 60 detik kalau jaringan gagal |
+| `FetchLyricsFromLrclib` | ±6460 | `/api/get` (judul, artis, album, durasi) lalu `/api/search` (judul penuh, lalu judul yang disederhanakan). Sejak 1.7.11 hanya status **200/404** yang dianggap jawaban; 503/429 diulang sekali setelah 1,5 detik; selain itu (timeout, 5xx) menandai `retryLater`. `trace` mencatat status tiap request untuk log |
+| `LyricsThreadProc` | ±6530 | loop 500ms, tunggu durasi ≤ 3 detik, cache 30 lagu. Hasil kosong dengan `retryLater` **tidak di-cache** dan dicoba ulang setelah 2 → 2 → 2 → 5 → 10 detik, lalu tiap 20 detik (`kRetryDelays`, `failedAttempts`). Jeda dihitung dari selesainya pencarian. Saat lagu di-pause, retry yang sedang berjalan atau sedang ditunggu (n) dan satu sesudahnya (n+1) tetap jalan; mulai n+2 ditahan sampai lagu di-play lagi (`pausedRetries`, direset saat playing). Pause di tengah pencarian menghitung pencarian itu sebagai n. Retry berhenti saat lagu berganti |
 | `DrawCollapsedLyrics` / `DrawLyricLine` | 10985 / 11048 | gambar baris, crossfade, scroll, ikon ♪ saat lebar normal |
 | `ActivityForKind` (case Media) | 12595 | memakai `LyricsWantWidePill` untuk lebar |
 
-**Kalau rusak:** lirik tidak pernah muncul. Cek apakah API LRCLIB berubah (field `syncedLyrics`), atau ada log `"Lyrics: LRCLIB unreachable"`.
+**Kalau rusak:** lirik tidak pernah muncul. Cek apakah API LRCLIB berubah (field `syncedLyrics`). Log per lagu (sejak 1.7.11):
+- `Lyrics: "<judul>" - <artis>: N synced lines (get 404, search 200)`: hasil final yang di-cache. N = 0 berarti LRCLIB memang tidak punya lirik synced untuk query itu.
+- `Lyrics: LRCLIB busy or unreachable for "<judul>" (search 503, search 503), retrying in 2s`: server sibuk atau timeout, akan dicoba lagi. Akhiran ` after playback resumes` berarti retry berikutnya ditahan karena lagu di-pause.
+
+**Penyebab "kadang lirik tidak muncul" sebelum 1.7.11:** LRCLIB sering membalas **503 `ServerOverloaded`** (terukur ±1 dari 3 request `/api/get` untuk lagu yang tidak ada, kadang juga `/api/search`). Mod lama menganggap body apa pun sebagai jawaban, sehingga 503 di-cache sebagai "tidak ada lirik" sampai mod restart. Contoh nyata: "スウェイ・イット・フラ・ガール" (Lisa Ono) gagal karena `search 503`, padahal liriknya ada.
 
 ---
 
@@ -294,7 +298,7 @@ Gambar dan hit-test mouse memakai **konstanta yang sama** di namespace `MediaLay
 | `SearchItunesArtwork` | ±6520 | satu request `itunes.apple.com/search?...&limit=15&term=...&country=..`; hasil dipotong per `"wrapperType"`; prioritas: artis+judul cocok → judul persis sama (`NormalizeTitleForMatch`, untuk klasik/kompilasi yang mencantumkan performer, bukan komposer) → artis saja (bukan untuk sumber browser). Body tanpa `"resultCount"` (rate limit/403) = gagal jaringan |
 | `FetchArtworkFromItunes` | ±6590 | urutan: store region Windows user (`UserStoreCountryCode`) → store US → judul saja; ganti `100x100bb` jadi `600x600bb`; download/decode gagal = gagal jaringan (di-retry, tidak di-cache) |
 | `ArtworkThreadProc` | ±6670 | cek tiap 1 detik, grace 4 detik, cache 30, retry 30 detik saat jaringan gagal, log `"Album art: ..."`; kalau cover dari cache hilang lagi (pause/seek) langsung dipasang ulang |
-| `HttpGet` | 4969 | WinHTTP GET (aman untuk biner, timeout 5/5/8/8 detik) |
+| `HttpGet` | ±5650 | WinHTTP GET (aman untuk biner, timeout 5/5/8/8 detik); parameter opsional `status` mengembalikan kode HTTP (0 = tidak ada jawaban), dipakai lirik sejak 1.7.11 |
 | `DrawAlbumArt` / `DrawAlbumArtPlaceholder` | ±13075 | gambar cover (fade-in `MediaLayout::kArtFadeSeconds`); kalau kosong: gradient diagonal dari warna aksen + glyph nada `` (warna glyph menyesuaikan terang/gelap aksen), badge ikon app di pojok saat expanded |
 
 **Kalau rusak:** yang tampil placeholder nada padahal lagu punya cover. Lihat log `Album art:` (DbgViewMini): "matched by ..." / "found no match" / "unreachable or refused". Kalau SMTC sendiri gagal, cek pembacaan stream (API Storage.Streams) dan decode WIC.
@@ -567,7 +571,7 @@ Saat expanded (hover atau pin), tab diganti dengan scroll roda mouse atau swipe 
 | lrclib.net | lirik | `/api/get`, `/api/search` (field `syncedLyrics`) | lirik tidak muncul; pill tetap 150px |
 | itunes.apple.com | cover cadangan | `/search?media=music&entity=song` (field `artistName`, `artworkUrl100`) | badge sumber tampil kalau SMTC juga tidak memberi cover |
 
-Semuanya lewat `HttpGet` (WinHTTP, user agent `DynamicIsland/1.0`, tanpa cek status HTTP; body error akan gagal diparsing dengan sendirinya).
+Semuanya lewat `HttpGet` (WinHTTP, user agent `DynamicIsland/1.0`). Umumnya status HTTP tidak dicek, karena body error akan gagal diparsing dengan sendirinya. Pengecualian: lirik LRCLIB membaca status (§5), karena 503 dari LRCLIB sering terjadi dan tidak boleh dianggap "tidak ada lirik".
 
 ---
 
@@ -621,6 +625,7 @@ Gunakan tabel ini untuk memetakan gejala ke area kode. Semua fitur di atas adala
 | 1.4.0 | **Lirik LRCLIB** di pill collapsed (+ toggle, cache, retry); pembacaan cover bertahap; **cover cadangan iTunes**; `HttpGet` aman untuk biner + timeout; lebar pill dinamis mengikuti lirik (lead 0,35 detik, jeda ≥ 4 detik kembali normal); setting **Lyrics delay (ms)** |
 | 1.5.0 | **Minimize**: garis glass + waveform, menempel 3px dari tepi layar, hitbox kecil tanpa jeda, hover membuka card |
 | 1.6.0 | **Notifikasi inline** di tengah pill musik (tanpa pill kedua, lebar mengikuti notifikasi, maks 460); **tab Aktivitas** untuk Timer/Progress; durasi notifikasi sesaat maksimal 3 detik |
+| 1.7.11 | **Lirik tidak lagi hilang karena LRCLIB sibuk**: `HttpGet` mengembalikan status HTTP; lookup LRCLIB hanya menerima 200/404, mengulang 503/429 sekali setelah 1,5 detik, dan hasil kosong yang tidak pasti tidak di-cache (retry 2/2/2/5/10 detik lalu tiap 20 detik; saat pause hanya retry n dan n+1 yang tetap jalan, sisanya menunggu lagu diputar lagi); log per lagu dengan status tiap request |
 | 1.7.10 | **Waveform seimbang**: `WaveformAnalyzer` dengan 6 band-pass (loudness berbobot frekuensi + density jumlah band aktif sebagai perkiraan jumlah instrumen); auto-gain dibatasi +8 dB, skala absolut −60…−10 dBFS dengan kurva 1,3, sehingga musik lembut bergerak tapi tetap kecil; `DrawWaveform` kini memancar dari tengah ke kiri dan kanan seperti garis minimize |
 | 1.7.9 | **Waveform lebih akurat untuk musik lembut**: skala dB dengan auto-gain (`g_waveformRefDb`, jendela 30 dB, acuan minimal −45 dB, gate −70 dB) menggantikan `RMS × 4` linear; satu sampel per ~10 ms sehingga release dan jarak antar-batang sesuai waktu nyata; tidak ada lagi nilai 0 palsu di antara paket |
 | 1.7.7 | **Tab Hardware disederhanakan**: 4 kartu (CPU, RAM, GPU, DISK) dalam grid 2×2 dengan geometri di `HardwareLayout`; NET UP/DOWN dihapus dan counter jaringan tidak lagi dipoll; ikon 21px dalam well bulat, sudut kartu mengikuti bentuk island, label lebih terang; RAM menampilkan persen + `used/total GB`; **CPU menampilkan GHz** (PDH `% Processor Performance`) dan **GPU menampilkan suhu** (D3DKMT adapter perf data), keduanya hanya dibaca saat tab Hardware tampil; **panah ganti drive** di kartu DISK (`CycleHardwareDisk`, disimpan di `HardwareDiskLetter`) |
