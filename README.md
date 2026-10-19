@@ -1,26 +1,8 @@
 # Dynamic Island for Windows (Fork)
 
-<!-- DEMO GIF: one recording that covers every feature, in this order (~45–60 seconds total).
-     Before recording: have Spotify AND a YouTube tab open, so the player-switch arrows appear.
-     1. Collapsed pill playing a song with synced lyrics (let one or two lines change).
-     2. Copy some text (Ctrl+C) so the clipboard alert appears INSIDE the music pill.
-     3. Hover to open the media card; click the ‹ › arrows to switch to YouTube and back.
-     4. Scroll the mouse wheel through the tabs:
-        - Date & Weather: hover one of the three chips so its explanation card shows.
-        - Hardware: show CPU GHz / GPU °C, click the › arrow on the DISK card to switch drives.
-        - then scroll back to Media.
-     5. Click the lyrics button (right of Next) to turn lyrics off, then on again.
-     6. Press volume up/down a few times (the volume pill appears, the Windows OSD does not).
-     7. Laptop only: press brightness up/down (the brightness pill appears).
-     8. Click the minimize button (left of Previous) → the island becomes a thin line;
-        hover the line to reopen the card, move away so it tucks back.
-     9. Put a YouTube video in fullscreen → the island shrinks into the line over the video.
-     Tip: keep it under ~10 MB so GitHub renders it (crop to the top of the screen, ~15 fps). -->
 <p align="center">
-  <img src="Demo.gif" alt="Dynamic Island demo covering lyrics, inline alerts, player switching, dashboard tabs, volume and brightness, minimize mode, and fullscreen video" width="800">
+  <img src="Demo.gif" alt="Dynamic Island for Windows demo" width="800">
 </p>
-
-**In the demo:** a song plays with synced lyrics scrolling in the pill, and copying text shows the clipboard alert right inside the music pill. Hovering opens the media card, where the arrows switch between Spotify and YouTube. The scroll wheel moves through the dashboard tabs: Date & Weather (hover a chip for an explanation) and Hardware (CPU clock, GPU temperature, and switching drives). The lyrics button turns lyrics off and back on. The volume and brightness keys show the island's own pills instead of the Windows flyouts. Minimize mode shrinks the island into a thin line at the top of the screen, and hovering the line opens the full card again. Finally, a fullscreen video turns the island into that same thin line, so it never covers the video.
 
 ---
 
