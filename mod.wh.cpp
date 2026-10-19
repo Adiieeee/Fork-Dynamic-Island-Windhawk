@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.7.11
+// @version         1.7.12
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -32,7 +32,6 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 | **Calendar** | A monthly grid that always fits its rows, with today marked in the accent colour. | ![Calendar](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/calendar.png) |
 | **Weather** | Real-time weather stats powered by wttr.in, including wind speed, humidity, and "feels like" temperature. Hover a chip for a short explanation of what it means. | ![Weather](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/weather-v2.png) |
 | **Hardware Monitor** | CPU (with its current clock), RAM, GPU (with its temperature, where the GPU reports one) and disk usage (the arrow on the disk card switches between drives), with load bars that turn amber past 75% and red past 90%. | ![Hardware Monitor](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/hardware-monitor.png) |
-| **Game Overlay** | Real-time FPS, CPU, GPU, RAM and disk, sized to whichever metrics you enable. | ![Gamebar](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/gamebar-v2.png) |
 | **Idle View** | A minimal dashboard with your battery status, digital clock, and sleek pagination dots. | ![Idle](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/idle-v2.png) |
 | **Camera Privacy** | Shows a green dot when an app is actively using your webcam. | ![Camera](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/camera-detected-v2.png) |
 | **Mic Privacy** | Shows an orange dot when an app is actively using your microphone. | ![Mic](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/mic-detected-v2.png) |
@@ -361,13 +360,7 @@ We love community contributions! To ensure high-quality updates, please follow t
     $description: Suppresses Dynamic Island notification alerts when Windows Do Not Disturb is active.
   - HardwareMonitorModule: true
     $name: Include Hardware Monitor in scroll loop
-    $description: Add CPU, GPU, RAM, FPS and Network stats card to mouse-wheel scroll loop.
-  - GameOverlay: false
-    $name: Enable game overlay mode
-    $description: Replaces the clock with live stats like FPS, CPU, and RAM usage.
-  - ShowMetricText: false
-    $name: Show labels in metric chips
-    $description: Adds text labels (like "CPU") inside the game overlay bars.
+    $description: Add a CPU, RAM, GPU and disk card to the mouse-wheel scroll loop.
   - Weather: true
     $name: Weather module
     $description: Shows the weather on the right side of the pill and on the Date & Weather tab. Turn off to only show the clock (the tab then shows the monthly calendar).
@@ -422,24 +415,6 @@ We love community contributions! To ensure high-quality updates, please follow t
   - MediaExpandBlocklist: ""
     $name: Never auto-expand for these apps
     $description: 'Comma-separated list of app or site names that should never make the island expand on a track change, while still updating quietly in the collapsed pill. Matched loosely against the media source and title, for example: chrome, tiktok, youtube.'
-  - GameOverlayShowFps: true
-    $name: Game overlay - show FPS
-    $description: Include the frame rate in the game overlay strip.
-  - GameOverlayShowCpu: true
-    $name: Game overlay - show CPU
-    $description: Include CPU utilization in the game overlay strip.
-  - GameOverlayShowGpu: true
-    $name: Game overlay - show GPU
-    $description: Include GPU utilization in the game overlay strip.
-  - GameOverlayShowRam: true
-    $name: Game overlay - show RAM
-    $description: Include memory usage in the game overlay strip.
-  - GameOverlayShowDisk: true
-    $name: Game overlay - show disk
-    $description: Include disk usage in the game overlay strip.
-  - GameOverlayCompact: false
-    $name: Game overlay - compact size
-    $description: Shrink the game overlay to a narrow strip that fits neatly inside the taskbar area.
   $name: Modules & Features
 - Shortcuts:
   - HideShowHotkeyEnabled: true
@@ -804,9 +779,9 @@ namespace HardwareLayout {
 // "10:41:32 PM" fits at textScale 1.0 (67.7px) but is clipped at 1.4 (94.8px)
 // and 1.6 (108.4px).
 //
-// The strip is now measured and sized to its real content. As with
-// GameOverlayLayout, the sizer (the render loop) and the painter
-// (DrawIdleDashboard) both read these constants so they cannot drift apart.
+// The strip is now measured and sized to its real content. The sizer (the
+// render loop) and the painter (DrawIdleDashboard) both read these constants
+// so they cannot drift apart.
 namespace IdleStripLayout {
     constexpr float kPadX = 14.0f;         // inner padding at each end
     constexpr float kSlotGap = 9.0f;       // clock <-> divider <-> weather
@@ -830,52 +805,6 @@ namespace IdleStripLayout {
     // Measured widths are rounded up to this so sub-pixel text metrics can't
     // resize the layered window every frame.
     constexpr float kWidthQuantum = 2.0f;
-}
-
-// Layout for the game overlay strip. The size the island animates to is decided
-// in the render loop, while the contents are painted by DrawGameOverlay. Those
-// two kept their own copies of the card width, padding and height, so widening a
-// card in one place left the other sizing the island for the old value -- the
-// strip would reserve room for four cards and then drop the last one on the
-// "ran out of room" check. Both read this now.
-//
-// Deliberately free of g_settings so it can sit up here with the other layout
-// namespaces; callers pass what they know.
-namespace GameOverlayLayout {
-    struct Metrics {
-        float padX;
-        float padY;
-        float cardW;
-        float gap;
-        float fpsW;
-        float fpsGap;
-        float radius;
-        float height;
-    };
-
-    // Cards are wider than the original 52/62 so a label and a three-digit value
-    // sit in separate bands without touching, and the corner radius matches the
-    // 9-10px used by every other card instead of the old 16, which on a 44px-tall
-    // card was very nearly a stadium.
-    constexpr Metrics For(bool compact) {
-        return compact ? Metrics{10.0f,  9.0f, 62.0f, 6.0f, 74.0f, 7.0f,  9.0f, 56.0f}
-                       : Metrics{12.0f, 11.0f, 74.0f, 7.0f, 88.0f, 8.0f, 10.0f, 68.0f};
-    }
-
-    constexpr float kMinWidth = 140.0f;
-
-    constexpr float Width(bool compact, bool showFps, int metricCount) {
-        const Metrics m = For(compact);
-        float w = m.padX * 2.0f;
-        if (showFps) {
-            w += m.fpsW + m.fpsGap;
-        }
-        if (metricCount > 0) {
-            w += static_cast<float>(metricCount) * m.cardW +
-                 static_cast<float>(metricCount - 1) * m.gap;
-        }
-        return w < kMinWidth ? kMinWidth : w;
-    }
 }
 
 // ── Media dashboard hit-test geometry ────────────────────────────────────────
@@ -1119,8 +1048,6 @@ struct Settings {
     D2D1_COLOR_F privacyDotsCamHex = D2D1::ColorF(0.133f, 0.776f, 0.239f, 1.0f); // #10B981
     float tintOpacity = 0.72f;
     float pillOpacity = 0.96f;
-    bool gameOverlay = false;
-    bool showMetricText = true;
     bool weather = true;
     std::wstring weatherCity;
     bool weatherUseLocation = false;
@@ -1176,14 +1103,6 @@ struct Settings {
 
     // ── Media auto-expand exclusions (#62) ───────────────────────────────────
     std::vector<std::wstring> mediaExpandBlocklist;
-
-    // ── Game overlay options (#25) ───────────────────────────────────────────
-    bool gameOverlayShowFps = true;
-    bool gameOverlayShowCpu = true;
-    bool gameOverlayShowGpu = true;
-    bool gameOverlayShowRam = true;
-    bool gameOverlayShowDisk = true;
-    bool gameOverlayCompact = false;
 };
 
 struct BitmapPixels {
@@ -1323,13 +1242,11 @@ struct SystemSnapshot {
     int memoryPercent = 0;
     float memoryUsedGB = 0.0f;
     float memoryTotalGB = 0.0f;
-    int diskFreePercent = 0;         // always C:, used by the game overlay
     // The Hardware Monitor's DISK card, which can be switched between fixed
     // drives with its arrow (see CycleHardwareDisk).
     wchar_t hwDiskLetter = L'C';
     int hwDiskFreePercent = 0;
     int fixedDriveCount = 1;
-    int renderFps = 0;
     int gpuPercent = -1;
     float netUpMbps = 0.0f;
     float netDownMbps = 0.0f;
@@ -2505,21 +2422,11 @@ void LoadSettings() {
             start = comma + 1;
         }
     }
-
-    // ── Game overlay options (#25) ───────────────────────────────────────────
-    next.gameOverlayShowFps = Wh_GetIntSetting(L"Modules.GameOverlayShowFps") != 0;
-    next.gameOverlayShowCpu = Wh_GetIntSetting(L"Modules.GameOverlayShowCpu") != 0;
-    next.gameOverlayShowGpu = Wh_GetIntSetting(L"Modules.GameOverlayShowGpu") != 0;
-    next.gameOverlayShowRam = Wh_GetIntSetting(L"Modules.GameOverlayShowRam") != 0;
-    next.gameOverlayShowDisk = Wh_GetIntSetting(L"Modules.GameOverlayShowDisk") != 0;
-    next.gameOverlayCompact = Wh_GetIntSetting(L"Modules.GameOverlayCompact") != 0;
     next.tintOpacity = Clamp(Wh_GetIntSetting(L"Themes.TintIntensity") / 100.0f, 0.0f, 1.0f);
     const int settingOpacity = Wh_GetIntSetting(L"Themes.PillOpacity");
     const int localOpacity = Wh_GetIntValue(L"PillOpacityOverride", -1);
     next.pillOpacity = Clamp((localOpacity >= 0 ? localOpacity : settingOpacity) / 100.0f,
                              0.35f, 1.0f);
-    next.gameOverlay = Wh_GetIntSetting(L"Modules.GameOverlay") != 0;
-    next.showMetricText = Wh_GetIntSetting(L"Modules.ShowMetricText") != 0;
     next.weather = Wh_GetIntSetting(L"Modules.Weather") != 0;
     next.weatherCity = GetStringSettingWithFallback(L"Modules.WeatherCity", L"Weather.WeatherCity", L"CalendarWeather.WeatherCity");
     next.weatherUseLocation = Wh_GetIntSetting(L"Modules.WeatherUseLocation") != 0;
@@ -7512,14 +7419,6 @@ void UpdateSystemSnapshot(bool includeGpuStats, bool includeNetStats, bool inclu
         next.memoryUsedGB = next.memoryTotalGB - static_cast<float>(memory.ullAvailPhys) / (1024.0f * 1024.0f * 1024.0f);
     }
 
-    ULARGE_INTEGER freeBytesAvailable = {};
-    ULARGE_INTEGER totalBytes = {};
-    ULARGE_INTEGER totalFreeBytes = {};
-    if (GetDiskFreeSpaceExW(L"C:\\", &freeBytesAvailable, &totalBytes, &totalFreeBytes) &&
-        totalBytes.QuadPart > 0) {
-        next.diskFreePercent = ClampInt(
-            static_cast<int>(totalFreeBytes.QuadPart * 100 / totalBytes.QuadPart), 0, 100);
-    }
     SampleHardwareDisk(next);
 
     HWND foreground = GetForegroundWindow();
@@ -9079,7 +8978,6 @@ void ShowContextMenu(HWND hwnd, POINT screenPoint) {
         }
     }
     AppendMenuW(menu, MF_STRING, 2, L"Pin expanded");
-    AppendMenuW(menu, MF_STRING, 3, Wh_GetIntValue(L"GameOverlayPinned", 0) ? L"Hide game overlay" : L"Show game overlay");
     std::wstring shapeStr = GetStringSettingCopy(L"Appearance.ShapeStyle");
     const int activeW11 = Wh_GetIntValue(L"W11StyleOverride", -1) >= 0
                           ? Wh_GetIntValue(L"W11StyleOverride", 0)
@@ -9142,9 +9040,6 @@ void ShowContextMenu(HWND hwnd, POINT screenPoint) {
             break;
         case 2:
             Wh_SetIntValue(L"PinnedExpanded", Wh_GetIntValue(L"PinnedExpanded", 0) ? 0 : 1);
-            break;
-        case 3:
-            Wh_SetIntValue(L"GameOverlayPinned", Wh_GetIntValue(L"GameOverlayPinned", 0) ? 0 : 1);
             break;
         case 4:
             Wh_SetIntValue(L"PillOpacityOverride", 100);
@@ -9447,9 +9342,7 @@ class Renderer {
         EnsureBrushes(settings, state, now);
         settingsOpacity_ = settings.pillOpacity;
 
-        const bool gameMetricsPresent = primary.kind == IslandKind::Idle &&
-            (settings.gameOverlay || Wh_GetIntValue(L"GameOverlayPinned", 0) != 0);
-        const float hoverScale = (settings.expandOnHover && ((hover && !gameMetricsPresent) || pinned)) ? 1.025f : 1.0f;
+        const float hoverScale = (settings.expandOnHover && (hover || pinned)) ? 1.025f : 1.0f;
         const float scale = hoverScale;
 
         const float top = (settings.notchStyle || settings.borderMergedMode) ? std::max(0.0f, nudge) : (kRenderPadY + nudge);
@@ -10913,36 +10806,11 @@ class Renderer {
         }
     }
 
-    // Small vector glyphs shared by the weather, hardware and game-overlay cards.
+    // Small vector glyphs shared by the weather and hardware cards.
     //   0 wind   1 thermometer   2 droplet
     //   3 cpu    4 memory        5 gpu       6 upload   7 download   8 disk
-    //   9 gauge (frame rate)
-    //
-    // The game overlay used to carry its own icon set (DrawGameIcon) drawn at
-    // different stroke weights and proportions, so the same CPU appeared as two
-    // different symbols depending on which surface you were looking at. Every
-    // surface now draws from this one family.
     void DrawMetricGlyph(D2D1_POINT_2F c, float s, int kind, ID2D1Brush* brush) {
         const float stroke = std::max(1.1f, 0.11f * s);
-
-        if (kind == 9) {  // gauge: dial arc, ticks and a needle
-            const float r = 0.40f * s;
-            target_->DrawEllipse(D2D1::Ellipse(c, r, r), brush, stroke);
-            for (int i = 0; i < 5; ++i) {
-                const float a = -3.14159265f * 0.8f + static_cast<float>(i) * 3.14159265f * 0.4f;
-                const float ca = std::cos(a);
-                const float sa = std::sin(a);
-                target_->DrawLine(D2D1::Point2F(c.x + ca * r, c.y + sa * r),
-                                  D2D1::Point2F(c.x + ca * (r - 0.10f * s), c.y + sa * (r - 0.10f * s)),
-                                  brush, stroke * 0.7f);
-            }
-            target_->FillEllipse(D2D1::Ellipse(c, 0.075f * s, 0.075f * s), brush);
-            const float na = -3.14159265f * 0.25f;
-            target_->DrawLine(c, D2D1::Point2F(c.x + std::cos(na) * r * 0.82f,
-                                               c.y + std::sin(na) * r * 0.82f),
-                              brush, stroke);
-            return;
-        }
 
         // Arrow used by the upload/download glyphs; `dir` is -1 up, +1 down.
         auto drawArrow = [&](float dir) {
@@ -11833,10 +11701,6 @@ class Renderer {
 
     void DrawIdleDashboard(const SharedState& state, D2D1_RECT_F rect, const Settings& settings,
                            double now) {
-        if (settings.gameOverlay || Wh_GetIntValue(L"GameOverlayPinned", 0) != 0) {
-            DrawGameOverlay(state, rect, 1.0f);
-            return;
-        }
         if (!clockFormat_) return;
 
         // Clip to the island's real silhouette (pill / notch / w11 rounded
@@ -12040,184 +11904,6 @@ class Renderer {
         }
 
         if (haveDashMask) target_->PopLayer(); else target_->PopAxisAlignedClip();
-    }
-
-    void DrawGameOverlay(const SharedState& state, D2D1_RECT_F rect, float unused_scale) {
-        (void)unused_scale;
-        const float scale = 1.0f;
-        const bool compact = g_settings.gameOverlayCompact;
-        const GameOverlayLayout::Metrics m = GameOverlayLayout::For(compact);
-
-        const float cardTop = rect.top + m.padY;
-        const float cardBottom = rect.bottom - m.padY;
-        float cursorX = rect.left + m.padX;
-
-        // ── FPS, given hero treatment ────────────────────────────────────────
-        // Frame rate is the number a player actually watches, so it gets a wider
-        // card and a larger figure than the percentages beside it. It has no
-        // 0-100 ceiling, so it gets no load bar and keeps the plain accent.
-        if (g_settings.gameOverlayShowFps) {
-            const D2D1_RECT_F fpsCard = D2D1::RectF(cursorX, cardTop, cursorX + m.fpsW, cardBottom);
-            DrawCard(fpsCard, m.radius);
-
-            ComPtr<ID2D1SolidColorBrush> fpsIcon;
-            if (SUCCEEDED(target_->CreateSolidColorBrush(
-                    WithAlpha(material_.accent, 0.90f * settingsOpacity_), &fpsIcon)) && fpsIcon) {
-                DrawMetricGlyph(D2D1::Point2F(fpsCard.left + 15.0f * scale, fpsCard.top + 15.0f * scale),
-                                15.0f * scale, 9, fpsIcon.Get());
-            }
-
-            const float textLeft = fpsCard.left + 28.0f * scale;
-            const float textRight = fpsCard.right - 9.0f * scale;
-
-            if (g_settings.showMetricText && smallTextFormat_) {
-                smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                mutedBrush_->SetOpacity(0.58f);
-                target_->DrawTextW(L"FPS", 3, smallTextFormat_.Get(),
-                                   D2D1::RectF(textLeft, fpsCard.top + 2.0f * scale,
-                                               textRight, fpsCard.top + 16.0f * scale),
-                                   mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-            }
-
-            wchar_t fpsValue[16] = {};
-            swprintf_s(fpsValue, L"%d", state.system.renderFps);
-            IDWriteTextFormat* fpsFmt = clockFormat_ ? clockFormat_.Get() : textFormat_.Get();
-            if (fpsFmt) {
-                // clockFormat_ is centre-aligned by default; the strip reads as a
-                // left-aligned column, so override for this draw and restore.
-                fpsFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                textBrush_->SetOpacity(0.97f);
-                // Shares the label's left margin so the glyph sits in its own
-                // column and the text column has one straight edge, rather than
-                // the value hanging out to the left of the label above it.
-                const float top = g_settings.showMetricText ? fpsCard.top + 16.0f * scale : cardTop;
-                target_->DrawTextW(fpsValue, static_cast<UINT32>(wcslen(fpsValue)), fpsFmt,
-                                   D2D1::RectF(textLeft, top,
-                                               textRight, cardBottom - 3.0f * scale),
-                                   textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                fpsFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            }
-
-            cursorX = fpsCard.right + m.fpsGap;
-        }
-
-        // ── Load cards ───────────────────────────────────────────────────────
-        // Laid out from whichever metrics are enabled (#25), so turning some off
-        // closes the gap instead of leaving a hole. Icons come from the shared
-        // DrawMetricGlyph family, so CPU here is the same symbol as CPU on the
-        // hardware dashboard.
-        struct GameCard {
-            const wchar_t* label;
-            int percent;
-            int glyph;
-            bool enabled;
-        };
-        const GameCard cards[] = {
-            {L"CPU", state.system.cpuPercent,              3, g_settings.gameOverlayShowCpu},
-            {L"RAM", state.system.memoryPercent,           4, g_settings.gameOverlayShowRam},
-            {L"GPU", state.system.gpuPercent,              5, g_settings.gameOverlayShowGpu},
-            {L"DISK", 100 - state.system.diskFreePercent,  8, g_settings.gameOverlayShowDisk},
-        };
-
-        for (const GameCard& card : cards) {
-            if (!card.enabled) {
-                continue;
-            }
-            if (cursorX + m.cardW > rect.right - m.padX + 0.5f) {
-                break;  // ran out of room
-            }
-            DrawGameMetricCard(D2D1::RectF(cursorX, cardTop, cursorX + m.cardW, cardBottom),
-                               card.label, card.percent, card.glyph, m.radius);
-            cursorX += m.cardW + m.gap;
-        }
-
-        textBrush_->SetOpacity(0.90f);
-        mutedBrush_->SetOpacity(0.58f);
-    }
-
-    void DrawGameMetricCard(D2D1_RECT_F rect, const wchar_t* label, int percent, int glyph, float radius) {
-        const float scale = 1.0f;
-
-        // Same semantic load colour the hardware dashboard uses: accent while a
-        // component is comfortable, amber under pressure, red when saturated.
-        // This replaces a per-metric rainbow (cyan CPU, magenta RAM, green GPU,
-        // orange disk) that encoded nothing and fought the album-art accent.
-        const bool known = percent >= 0;
-        const float pct = known ? Clamp(percent / 100.0f, 0.0f, 1.0f) : 0.0f;
-        const D2D1_COLOR_F tint = known ? LoadStateColor(pct) : material_.accent;
-
-        // Fill only. This card used to carry a hairline border *and* a
-        // metric-coloured ring on top of it -- two bright outlines per card,
-        // four cards across, which is the edge lighting this design drops.
-        DrawCard(rect, radius);
-
-        ComPtr<ID2D1SolidColorBrush> glyphBrush;
-        if (SUCCEEDED(target_->CreateSolidColorBrush(
-                WithAlpha(tint, 0.85f * settingsOpacity_), &glyphBrush)) && glyphBrush) {
-            DrawMetricGlyph(D2D1::Point2F(rect.left + 15.0f * scale, rect.top + 15.0f * scale),
-                            14.0f * scale, glyph, glyphBrush.Get());
-        }
-
-        const float textLeft = rect.left + 28.0f * scale;
-        const float textRight = rect.right - 8.0f * scale;
-
-        // Label above value above bar, matching the hardware dashboard exactly.
-        if (g_settings.showMetricText && smallTextFormat_) {
-            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            mutedBrush_->SetOpacity(0.58f);
-            target_->DrawTextW(label, static_cast<UINT32>(wcslen(label)), smallTextFormat_.Get(),
-                               D2D1::RectF(textLeft, rect.top + 2.0f * scale,
-                                           textRight, rect.top + 16.0f * scale),
-                               mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-        }
-
-        wchar_t value[16] = {};
-        if (known) {
-            swprintf_s(value, L"%d%%", percent);
-        } else {
-            wcscpy_s(value, ARRAYSIZE(value), L"--");
-        }
-
-        if (textFormat_) {
-            textFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            textFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            textBrush_->SetOpacity(0.95f);
-            // Aligned with the label above it, so the glyph owns the left column
-            // and label/value share one straight edge.
-            const float valueTop = g_settings.showMetricText ? rect.top + 17.0f * scale
-                                                             : rect.top + 4.0f * scale;
-            target_->DrawTextW(value, static_cast<UINT32>(wcslen(value)), textFormat_.Get(),
-                               D2D1::RectF(textLeft, valueTop,
-                                           textRight, rect.bottom - 8.0f * scale),
-                               textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            textFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-        }
-
-        // The bar spans the card rather than just the text column: at this size it
-        // reads as the card's own meter, and a 38px stub under the value did not.
-        const D2D1_RECT_F track = D2D1::RectF(rect.left + 13.0f * scale, rect.bottom - 7.0f * scale,
-                                              rect.right - 13.0f * scale, rect.bottom - 4.5f * scale);
-        ComPtr<ID2D1SolidColorBrush> trackBrush;
-        if (SUCCEEDED(target_->CreateSolidColorBrush(material_.raisedStrong, &trackBrush)) && trackBrush) {
-            target_->FillRoundedRectangle(D2D1::RoundedRect(track, 1.25f * scale, 1.25f * scale), trackBrush.Get());
-        }
-        const float span = (track.right - track.left) * pct;
-        if (span > 0.5f) {
-            ComPtr<ID2D1SolidColorBrush> fillBrush;
-            if (SUCCEEDED(target_->CreateSolidColorBrush(WithAlpha(tint, 0.95f), &fillBrush)) && fillBrush) {
-                target_->FillRoundedRectangle(
-                    D2D1::RoundedRect(D2D1::RectF(track.left, track.top, track.left + span, track.bottom),
-                                      1.25f * scale, 1.25f * scale),
-                    fillBrush.Get());
-            }
-        }
-
-        textBrush_->SetOpacity(0.90f);
-        mutedBrush_->SetOpacity(0.58f);
     }
 
     // Publishes the content-space rect currently being painted so
@@ -15553,9 +15239,6 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     mediaActive = g_settings.media && g_state.media.available;
                     kinds = ChooseActivities(g_state, g_settings, NowSeconds());
                 }
-                const bool gameMetricsPresent =
-                    !kinds.empty() && kinds[0] == IslandKind::Idle &&
-                    (g_settings.gameOverlay || Wh_GetIntValue(L"GameOverlayPinned", 0) != 0);
 
                 // A minimized island (or the line over a full-screen video) is
                 // already open whenever it can be clicked (hovering opens it),
@@ -15563,7 +15246,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 bool expanded = Wh_GetIntValue(L"PinnedExpanded", 0) != 0 || g_clickExpanded.load() ||
                                 g_islandMinimized.load() ||
                                 (g_isFullscreen.load() && !g_fullscreenOverrideVisible.load());
-                if (!gameMetricsPresent && !g_settings.expandOnHover && !expanded) {
+                if (!g_settings.expandOnHover && !expanded) {
                     g_clickExpanded = true;
                     g_layoutDirty = true;
                     return 0; // consumed click to expand
@@ -16275,16 +15958,10 @@ DWORD WINAPI RenderThreadProc(void*) {
         }
 
         bool isHoverExpanded = g_settings.expandOnHover ? hover : (hover && g_clickExpanded.load());
-        const bool gameMetricsPresent = primary.kind == IslandKind::Idle &&
-            (g_settings.gameOverlay || Wh_GetIntValue(L"GameOverlayPinned", 0) != 0);
-        if (gameMetricsPresent) {
-            isHoverExpanded = false;
-        }
 
         // Minimized: the island rests as a thin line and hovering it always
-        // opens the full card, whatever Expand-on-hover is set to. The in-game
-        // metrics strip keeps its own behaviour.
-        const bool minimizedMode = g_islandMinimized.load(std::memory_order_relaxed) && !gameMetricsPresent;
+        // opens the full card, whatever Expand-on-hover is set to.
+        const bool minimizedMode = g_islandMinimized.load(std::memory_order_relaxed);
         if (minimizedMode || videoSuppressed) {
             isHoverExpanded = hover;
         }
@@ -16341,10 +16018,9 @@ DWORD WINAPI RenderThreadProc(void*) {
         const bool camIndicatorActive = snapshot.system.cameraActive && g_settings.privacyDots && g_settings.privacyDotsCam;
         const bool privacyActive = micIndicatorActive || camIndicatorActive;
 
-        // Whether any surface that actually draws CPU / RAM / disk / GPU / network
-        // figures is on screen: the in-game overlay, or the idle dashboard's
-        // Hardware Monitor tab while expanded (hovered or pinned) and scrolled into
-        // view.
+        // Whether the surface that draws CPU / RAM / disk / GPU figures is on
+        // screen: the Hardware Monitor tab while expanded (hovered or pinned) and
+        // scrolled into view.
         //
         // Hoisted out of the poll block below because two decisions need it: whether
         // to sample the expensive GPU and network counters at all, and whether a
@@ -16353,12 +16029,11 @@ DWORD WINAPI RenderThreadProc(void*) {
         const bool onHardwareMonitorTab = (metricTabIdx == HardwareMonitorTabIndex(g_settings));
         const bool hwMonitorVisible = (primary.kind == IslandKind::Idle || primary.kind == IslandKind::Media) &&
             ((!isFullscreen && (pinned || isHoverExpanded)) || videoHoverOpen) &&
-            !gameMetricsPresent && onHardwareMonitorTab;
-        const bool gameOverlayVisible = gameMetricsPresent && !isFullscreen;
-        const bool systemMetricsVisible = hwMonitorVisible || gameOverlayVisible;
+            onHardwareMonitorTab;
+        const bool systemMetricsVisible = hwMonitorVisible;
 
         if (now >= nextSystemPoll) {
-            const bool needGpuStats = gameOverlayVisible || hwMonitorVisible;
+            const bool needGpuStats = hwMonitorVisible;
             const bool needNetStats = false;  // no surface draws network throughput any more
 
             UpdateSystemSnapshot(needGpuStats, needNetStats, hwMonitorVisible);
@@ -16379,23 +16054,6 @@ DWORD WINAPI RenderThreadProc(void*) {
                     renderer.MeasureIdleStrip(snapshot, g_settings, now).totalWidth *
                     g_settings.sizeScale;
             }
-        }
-        if (!isFullscreen && primary.kind == IslandKind::Idle &&
-            (g_settings.gameOverlay || Wh_GetIntValue(L"GameOverlayPinned", 0) != 0)) {
-            // Width follows the metrics actually enabled (#25) so switching some
-            // off shrinks the strip instead of leaving empty space, and compact
-            // mode narrows it enough to sit neatly in the taskbar area. Both the
-            // size and the painting come from GameOverlayLayout, so the strip
-            // cannot end up sized for a card width DrawGameOverlay no longer uses.
-            const int metricCount = (g_settings.gameOverlayShowCpu ? 1 : 0) +
-                                    (g_settings.gameOverlayShowRam ? 1 : 0) +
-                                    (g_settings.gameOverlayShowGpu ? 1 : 0) +
-                                    (g_settings.gameOverlayShowDisk ? 1 : 0);
-
-            const bool compact = g_settings.gameOverlayCompact;
-            primary.width = GameOverlayLayout::Width(compact, g_settings.gameOverlayShowFps,
-                                                     metricCount) * g_settings.sizeScale;
-            primary.height = GameOverlayLayout::For(compact).height * g_settings.sizeScale;
         }
         if (primary.kind == IslandKind::Media) {
             if ((!isFullscreen && (isHoverExpanded || pinned || recentTrackChange)) || videoHoverOpen) {
@@ -16537,11 +16195,6 @@ DWORD WINAPI RenderThreadProc(void*) {
             g_minimizedEdgeFraction = edgeSpring.value;
             g_layoutDirty = true;  // Render() repositions the window when dirty
             needsRender = true;
-        }
-
-        {
-            std::lock_guard lock(g_stateMutex);
-            g_state.system.renderFps = ClampInt(static_cast<int>(1.0f / std::max(dt, 0.001f) + 0.5f), 0, 1000);
         }
 
         const bool draggingOrHover = hover || ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 && PtInRect(&windowRect, cursor));
@@ -16714,7 +16367,6 @@ DWORD WINAPI RenderThreadProc(void*) {
         static uint64_t prevClipIconGen = 0;
         static int prevCpu = -1;
         static int prevRam = -1;
-        static int prevDisk = -1;
         static int prevHwDisk = -1;
         static int prevCpuDeciGHz = -1;  // tenths of a GHz, the precision drawn
         static int prevGpuTemp = -1;
@@ -16735,7 +16387,6 @@ DWORD WINAPI RenderThreadProc(void*) {
         const bool systemMetricsChanged =
             systemMetricsVisible && (snapshot.system.cpuPercent != prevCpu ||
                                      snapshot.system.memoryPercent != prevRam ||
-                                     snapshot.system.diskFreePercent != prevDisk ||
                                      snapshot.system.hwDiskFreePercent != prevHwDisk ||
                                      snapshot.system.hwDiskLetter != prevHwDiskLetter ||
                                      static_cast<int>(snapshot.system.cpuGHz * 10.0f + 0.5f) != prevCpuDeciGHz ||
@@ -16766,7 +16417,6 @@ DWORD WINAPI RenderThreadProc(void*) {
             prevClipIconGen = snapshot.clipboard.appIcon.generation;
             prevCpu = snapshot.system.cpuPercent;
             prevRam = snapshot.system.memoryPercent;
-            prevDisk = snapshot.system.diskFreePercent;
             prevHwDisk = snapshot.system.hwDiskFreePercent;
             prevHwDiskLetter = snapshot.system.hwDiskLetter;
             prevCpuDeciGHz = static_cast<int>(snapshot.system.cpuGHz * 10.0f + 0.5f);
