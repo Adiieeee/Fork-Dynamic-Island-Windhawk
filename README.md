@@ -11,7 +11,7 @@ A [Windhawk](https://windhawk.net) mod that adds an iPhone-style **Dynamic Islan
 This is a fork of [devcode90/Dynamic-Island-for-Windows](https://github.com/devcode90/Dynamic-Island-for-Windows) by Himanshu. It adds synced lyrics, a minimize mode, inline alerts, instant volume/brightness pills that replace the Windows OSD, player switching, a redesigned Date & Weather tab, a simpler Hardware tab, and many fixes.
 
 - **Mod id:** `dynamic-island-for-windows-fork`
-- **Version:** 1.7.13
+- **Version:** 1.7.14
 - **License:** [MIT](LICENSE)
 - **Technical reference:** [DOCUMENTATION.md](DOCUMENTATION.md) explains how each feature should behave, where its code lives, and which Windows APIs it uses. Use it when something breaks after a Windows update.
 
@@ -49,6 +49,8 @@ Depending on what's happening, the pill turns into:
 
 ### Media & music
 - **Synced lyrics (LRCLIB).** The current line scrolls in the collapsed pill with a crossfade between lines. The pill only widens while there is a line to sing and shrinks back during intros, outros and instrumental breaks. Toggle lyrics with the button to the right of Next; adjust timing with the **Lyrics delay (ms)** setting.
+- **Now playing peek.** For a few seconds after the track changes, the collapsed pill shows the title and artist, for every song, then goes back to the lyrics.
+- **Tracks without lyrics** (instrumental on LRCLIB, or no synced lyrics found) show accent beamed notes (♫) in the middle of the pill, different from the small ♪ shown while a sung song is in an instrumental break.
 - **Reliable lyric lookups.** When LRCLIB is overloaded (HTTP 503/429), the lookup is retried instead of being cached as "no lyrics". Retries pause while the track is paused.
 - **Album art fallback.** If a player doesn't provide a cover within 4 seconds, the cover is fetched from the iTunes Search API (600×600). If nothing is found, an accent-colored placeholder with a music note is shown, and a late cover fades in.
 - **Player switching.** When several apps have a media session (e.g. Spotify and a YouTube tab), `‹` / `›` arrows appear on the media card to choose which player the island shows and controls.
@@ -133,6 +135,6 @@ Right-click menu choices (theme, shape, pin) last for the current session only; 
 - **[ciizerr](https://github.com/ciizerr)**: layout alignment, dashboard scaling, calendar and weather integration.
 - **[ChrisSch-dev](https://github.com/ChrisSch-dev)**: album title, weather word wrapping, sleep-resume fixes, performance and stability.
 - **[thevioletto](https://github.com/thevioletto)**: custom fonts, Do Not Disturb integration, album-art color sampling, settings reorganization.
-- **[Adiieeee](https://github.com/Adiieeee)**: this fork: synced lyrics, album-art fallback, minimize mode, inline alerts, instant volume/brightness with Windows OSD suppression, fullscreen-video line, player switching, Date & Weather tab, Hardware tab redesign, waveform rework.
+- **[Adiieeee](https://github.com/Adiieeee)**: this fork: synced lyrics with the track peek and the no-lyrics note, album-art fallback, minimize mode, inline alerts, instant volume/brightness with Windows OSD suppression, fullscreen-video line, player switching, Date & Weather tab, Hardware tab and idle clock redesigns, waveform rework.
 
 Bug reports and feature requests: [devcode90/dynamic-island-for-windows issues](https://github.com/devcode90/dynamic-island-for-windows/issues) or [Windhawk mods issues](https://github.com/ramensoftware/windhawk-mods/issues).

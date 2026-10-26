@@ -54,7 +54,7 @@ Complete functional reference for `mod.wh.cpp`. Purpose: if the mod ever breaks 
 "/c/Program Files/Windhawk/Compiler/bin/clang++.exe" -fsyntax-only -Wall -std=c++23 \
   -target x86_64-w64-mingw32 -DWH_MOD -DUNICODE -D_UNICODE \
   -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
-  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.13"' \
+  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.14"' \
   -include windhawk_api.h -x c++ mod.wh.cpp
 ```
 
@@ -176,7 +176,7 @@ Drawing and mouse hit-testing use **the same constants** in the namespaces `Medi
 
 **Collapsed pill** (`DrawMedia`, ±10352, "Collapsed UI" branch):
 - Left: round album art. Right: waveform (`DrawWaveform`, ±11542) while playing, or static dots while paused.
-- Middle: **inline notification** (§8) if there is one; otherwise **lyrics** (§5).
+- Middle: **inline notification** (§8) if there is one; otherwise, for **4.5 seconds after the track changes** (`TrackPeekActive`, `kTrackPeekSeconds`), the **track peek**: title (`boldTextFormat_`) over artist (`smallTextFormat_`, muted), centred, with 0.25 s fade-in and 0.35 s fade-out (`DrawTrackPeek`, since 1.7.14). It applies to every track, with or without lyrics, needs the track to be playing, and widens the pill to `kCollapsedLyricsWidth` through `ActivityForKind`. After the peek come the **lyrics** (§5), which fade in (`kTrackPeekShownKey` marks the hand-over), or, for a track without lyrics, the **beamed note** (§5). With `MediaAutoExpand` on, the 5-second auto-expanded card covers the peek.
 - Base width `MediaLayout::kCollapsedWidth` = 150. With lyrics: `kCollapsedLyricsWidth` = 320.
 
 **Waveform (since 1.7.10):** the waveform shows **perceived loudness**, influenced by frequency content and the number of "instruments". It is not a per-bar spectrum.
@@ -256,6 +256,10 @@ Drawing and mouse hit-testing use **the same constants** in the namespaces `Medi
   - Intros, outros, and instrumental breaks **≥ 4 seconds** (`kShortGapSeconds`): back to 150px with a small ♪ icon.
   - Gaps under 4 seconds between lines: stays wide.
   - The line being sung is never cut off even if a gap is close.
+- **Tracks without lyrics (since 1.7.14):** when a lookup finishes without synced lines, the 150px pill shows **two eighth notes joined by a single beam, in the accent** (`DrawInstrumentalNote`), fading in as the track peek (§4) ends. Deliberately different from the single ♪ text glyph of a sung song's break.
+  - **Instrumental:** when LRCLIB answers with `"instrumental": true` (`FirstJsonBoolFieldTrue`, which also stops the looser searches), the status is `Instrumental` (cached like other results). The log line reads `0 synced lines, instrumental`.
+  - **Not found:** a finished lookup with no synced lyrics (`NotFound`: not on LRCLIB, or plain lyrics only) gets the same note (`LyricsShowInstrumentalNote`), so the middle is never left empty for a track that will not get lyrics. A lookup LRCLIB was too busy to answer (`retryLater`) shows nothing until its retry answers, because the thread clears `trackKey` for the retry.
+  - **Drawing:** vectors (`DrawBeamedEighthNotes`), because Segoe UI renders U+266B with a double beam that reads as sixteenths. The drawing is as tall as the ink of the typed U+266B at `smallTextFormat_` size × 1.3 (`kNoteScale`), measured with `GetOverhangMetrics` in `BeamedNoteGlyphInkHeight` and cached per size.
 - **Toggle** via the button to the right of Next. State is stored in `Wh_SetIntValue("LyricsEnabled")`.
 - **`LyricsDelayMs` setting** (−10000..10000): positive values make lyrics appear later.
 
@@ -265,6 +269,7 @@ Drawing and mouse hit-testing use **the same constants** in the namespaces `Medi
 |---|---|---|
 | `LyricsTrackKey` | 5268 | track key = `title + U+001F + artist` (used by the thread, width, and drawing) |
 | `LyricsShowable` | 5276 | lyrics enabled, status Found, and key matches the current track |
+| `LyricsShowInstrumentalNote` | ±6167 | lyrics enabled, status Instrumental or NotFound, and key matches the current track |
 | `MediaPlayheadSeconds` / `LyricsPlayheadSeconds` | 5291 / 5300 | track position (`positionTicks` + time since `lastUpdatedTicks`), minus the delay |
 | `LyricLineIndexAt`, `IsLyricGap` | 5284 / 5305 | active line; empty lines or lines with only ♪/♫ count as gaps |
 | `LyricsWantWidePill` | 5322 | dynamic-width decision |
@@ -620,6 +625,7 @@ Use this table to map symptoms to code areas. Every feature above is **target be
 | 1.4.0 | **LRCLIB lyrics** in the collapsed pill (+ toggle, cache, retry); incremental cover reading; **iTunes backup cover**; binary-safe `HttpGet` + timeouts; dynamic pill width following lyrics (0.35-second lead, gaps ≥ 4 seconds return to normal); **Lyrics delay (ms)** setting |
 | 1.5.0 | **Minimize**: glass line + waveform, sits 3px from the screen edge, small hitbox with no delay, hover opens the card |
 | 1.6.0 | **Inline notifications** in the middle of the music pill (no second pill, width follows the notification, max 460); **Activity tab** for Timer/Progress; transient notification duration capped at 3 seconds |
+| 1.7.14 | **Track peek**: for 4.5 s after every track change (lyrics or not) the collapsed media pill widens and shows the title over the artist (`TrackPeekActive`, `DrawTrackPeek`), then the lyrics fade in. **Tracks without lyrics** show accent beamed eighth notes in the middle of the pill: LRCLIB's `instrumental` flag is now read (new `Instrumental` lyrics status, `FirstJsonBoolFieldTrue`), and a finished lookup with no synced lyrics gets the same note (`LyricsShowInstrumentalNote`); the note is drawn as vectors with a single beam (`DrawBeamedEighthNotes`), sized from the ink of the U+266B glyph |
 | 1.7.13 | **Redesigned idle clock**: Time tab rebuilt from the shared card parts (analog clock card with ticking accent second hand, accent greeting over a large digital clock with muted AM/PM, plain-text week strip with today on an accent disc, no duplicate date unless `DateFirst`; **minimize button on the Time tab** so minimize mode can be switched without music; privacy chip replaces the strip while mic/camera is in use); collapsed idle strip uses the accent vector weather icon instead of an emoji and mutes AM/PM; weekday name on the date hero (Date & Weather and Calendar tabs) in the text colour instead of grey |
 | 1.7.11 | **Lyrics no longer go missing when LRCLIB is busy**: `HttpGet` returns the HTTP status; LRCLIB lookups only accept 200/404, retry 503/429 once after 1.5 seconds, and uncertain empty results aren't cached (retry 2/2/2/5/10 seconds then every 20 seconds; while paused only retries n and n+1 still run, the rest wait for playback to resume); per-track log with each request's status |
 | 1.7.10 | **Balanced waveform**: `WaveformAnalyzer` with 6 band-pass filters (frequency-weighted loudness + density of active bands as an estimate of instrument count); auto-gain capped at +8 dB, absolute −60…−10 dBFS scale with a 1.3 curve, so soft music moves but stays small; `DrawWaveform` now radiates from the center to the left and right like the minimize line |

@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.7.13
+// @version         1.7.14
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -28,11 +28,11 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 
 | Module | Description | Preview |
 | :--- | :--- | :--- |
-| **Media Player** | Shows live album art, track details, audio waveforms, and full playback controls. Synced lyrics (from [LRCLIB](https://lrclib.net)) scroll along in the collapsed pill; toggle them with the lyrics button next to the playback controls. | ![Media](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/media-v2.png) |
+| **Media Player** | Shows live album art, track details, audio waveforms, and full playback controls. Synced lyrics (from [LRCLIB](https://lrclib.net)) scroll along in the collapsed pill; toggle them with the lyrics button next to the playback controls. When the track changes, the pill briefly shows the title and artist; tracks without lyrics show a small pair of beamed notes. | ![Media](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/media-v2.png) |
 | **Calendar** | A monthly grid that always fits its rows, with today marked in the accent colour. | ![Calendar](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/calendar.png) |
 | **Weather** | Real-time weather stats powered by wttr.in, including wind speed, humidity, and "feels like" temperature. Hover a chip for a short explanation of what it means. | ![Weather](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/weather-v2.png) |
 | **Hardware Monitor** | CPU (with its current clock), RAM, GPU (with its temperature, where the GPU reports one) and disk usage (the arrow on the disk card switches between drives), with load bars that turn amber past 75% and red past 90%. | ![Hardware Monitor](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/hardware-monitor.png) |
-| **Idle View** | A minimal dashboard with your battery status, digital clock, and sleek pagination dots. | ![Idle](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/idle-v2.png) |
+| **Idle View** | A clock and weather strip. Hover it for the Time tab: an analog clock, a greeting, a large digital clock and this week's dates, with the minimize button in its top-right corner. | ![Idle](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/idle-v2.png) |
 | **Camera Privacy** | Shows a green dot when an app is actively using your webcam. | ![Camera](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/camera-detected-v2.png) |
 | **Mic Privacy** | Shows an orange dot when an app is actively using your microphone. | ![Mic](https://raw.githubusercontent.com/devcode90/Dynamic-Island-for-Windows/793cf954d51aa9748c39d544187fab6e25ecd0fb/previews/mic-detected-v2.png) |
 
@@ -58,7 +58,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 - **Hover & Scroll:** Hover over the island to seamlessly expand it. Use your mouse scroll wheel to swipe between the Media, Date & Weather (today's date beside the current conditions; the monthly calendar when the Weather module is off), Hardware Monitor, and File Tray tabs.
 - **File Tray:** Enable the File Tray module, then drag files onto the island. It jumps to the shelf to confirm the drop. Click a row to open that file; right-click the island to clear the shelf.
 - **Alerts while music plays:** Volume, brightness, clipboard, Caps Lock, notifications, battery, USB, Bluetooth and Do Not Disturb alerts appear inside the media pill, between the album art and the waveform (briefly replacing the lyric line), and the pill stretches to fit them. A running focus timer or progress task gets its own Activity tab at the end of the scroll loop instead.
-- **Minimize:** The button left of "previous" on the media card tucks the island away into a thin glass line with a faint live waveform. Hover the line to open the full island; click the button again to bring the normal pill back. Alerts such as volume or notifications still pop out while minimized.
+- **Minimize:** The button left of "previous" on the media card (or, without music, the one in the corner of the Time tab) tucks the island away into a thin glass line with a faint live waveform. Hover the line to open the full island; click the button again to bring the normal pill back. Alerts such as volume or notifications still pop out while minimized.
 - **Switch player:** When more than one app is playing media (say Spotify and a YouTube tab), small arrows appear beside the elapsed and remaining times on the media card. Click them to choose which player the island shows and controls. The choice holds until that player closes.
 - **Right-Click Menu:** Right-click the island to access Theme presets, Transparency settings, and to pin the island open.
 - **⚠️ Right-click choices are per-session:** The right-click menu is a quick way to try things out, not a place to configure the mod. **Theme**, **shape style** (Pill / Notch / Windows 11) and **pin open** are all re-applied from your Windhawk settings whenever the mod restarts — so a reboot, a mod update, or toggling the mod off and on will discard them. Anything you want to keep, set in the **Mod Settings** tab instead. (Transparency and Expand-on-hover do persist, but the settings tab is still the reliable place for them.)
@@ -76,6 +76,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 - Suggestions for UI/UX or new integrations are always welcome.
 
 ### Credits
+- **[Adiieeee @GitHub](https://github.com/Adiieeee)**: This fork: synced lyrics with the track peek and the no-lyrics note, album-art fallback, minimize mode, inline alerts, instant volume/brightness with Windows OSD suppression, fullscreen-video line, player switching, Date & Weather tab, Hardware tab and idle clock redesigns, waveform rework.
 - **[Sarthak Singh (sarthakaksh) @GitHub](https://github.com/sarthakaksh)**: Major feature overhaul including the right-click focus timer, hover clock, robust media controls, zero-CPU instant hide shortcut, Bluetooth battery integration, image clipboard thumbnails, and full-screen autohide fixes.
 - **[ciizerr @GitHub](https://github.com/ciizerr)**: Improved the UI by refining layout alignment, fixing dashboard scaling, and enhancing calendar and weather module integration.
 - **[ChrisSch-dev @GitHub](https://github.com/ChrisSch-dev)**: Added album title support, word wrapping for weather descriptions, sleep resume fixes, and various performance/movement stability improvements.
@@ -1174,7 +1175,9 @@ struct LyricLine {
 // Synced lyrics for the track named by trackKey (see LyricsTrackKey), fetched
 // from LRCLIB by LyricsThreadProc. Lines are sorted by time.
 struct LyricsSnapshot {
-    enum class Status { None, Loading, Found, NotFound };
+    // Instrumental: LRCLIB marks the track as having no vocals at all, as
+    // opposed to NotFound (lyrics exist somewhere, just not synced ones here).
+    enum class Status { None, Loading, Found, NotFound, Instrumental };
     Status status = Status::None;
     std::wstring trackKey;
     std::vector<LyricLine> lines;
@@ -6161,6 +6164,30 @@ bool LyricsShowable(const SharedState& state) {
            state.lyrics.trackKey == LyricsTrackKey(state.media);
 }
 
+// True when lyrics are on and the lookup for the track now playing finished
+// without synced lines: LRCLIB marks it instrumental, or has nothing for it.
+// Both get the instrumental note, so the middle of the pill is never left
+// empty for a track that will not get lyrics. A lookup LRCLIB was too busy to
+// answer is not "nothing": LyricsThreadProc clears trackKey for its retry, so
+// the key no longer matches and no note shows until the retry has answered.
+bool LyricsShowInstrumentalNote(const SharedState& state) {
+    return g_lyricsEnabled.load(std::memory_order_relaxed) &&
+           (state.lyrics.status == LyricsSnapshot::Status::Instrumental ||
+            state.lyrics.status == LyricsSnapshot::Status::NotFound) &&
+           state.lyrics.trackKey == LyricsTrackKey(state.media);
+}
+
+// "Now playing" peek: for a few seconds after the track changes, the collapsed
+// pill widens (as for a lyric line) to show the title and artist, then goes
+// back to the lyrics, the instrumental note or its normal size. Applies to every
+// track, with or without lyrics.
+constexpr double kTrackPeekSeconds = 4.5;
+
+bool TrackPeekActive(const SharedState& state, double now) {
+    return state.media.available && state.media.playing && !state.media.title.empty() &&
+           state.media.titleChangedAt > 0.0 && now - state.media.titleChangedAt < kTrackPeekSeconds;
+}
+
 // Index of the line being sung at positionSec, or -1 before the first line.
 int LyricLineIndexAt(const std::vector<LyricLine>& lines, double positionSec) {
     auto it = std::upper_bound(lines.begin(), lines.end(), positionSec,
@@ -6271,6 +6298,23 @@ void AppendUtf8CodePoint(std::string& out, uint32_t cp) {
 // Finds the next `"key": "<string>"` at or after *searchFrom and returns the
 // unescaped (UTF-8) value. A `null` value is skipped, so on an LRCLIB search
 // array this walks to the first entry that actually has the field filled in.
+// True when the first occurrence of `key` in `json` has the literal value true.
+// Enough for LRCLIB, whose /api/get answers one object and /api/search lists
+// the best match first.
+bool FirstJsonBoolFieldTrue(const std::string& json, const char* key) {
+    const std::string needle = std::string("\"") + key + "\"";
+    size_t pos = json.find(needle);
+    if (pos == std::string::npos) {
+        return false;
+    }
+    pos += needle.size();
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == ':' || json[pos] == '\t' ||
+                                 json[pos] == '\r' || json[pos] == '\n')) {
+        ++pos;
+    }
+    return json.compare(pos, 4, "true") == 0;
+}
+
 bool NextJsonStringField(const std::string& json, const char* key, size_t* searchFrom, std::string* out) {
     const std::string needle = std::string("\"") + key + "\"";
     size_t pos = *searchFrom;
@@ -6407,6 +6451,7 @@ std::wstring SimplifyTrackTitle(const std::wstring& title) {
 // song has no lyrics". `trace` lists the status codes for the log.
 struct LyricsLookup {
     std::vector<LyricLine> lines;
+    bool instrumental = false;  // LRCLIB's "instrumental": true, with no lines
     bool retryLater = false;
     std::wstring trace;
 };
@@ -6447,6 +6492,12 @@ LyricsLookup FetchLyricsFromLrclib(const std::wstring& title, const std::wstring
                 return true;
             }
         }
+        // An instrumental track has no lyrics anywhere, so a looser search
+        // could only turn up some other song's.
+        if (FirstJsonBoolFieldTrue(body, "instrumental")) {
+            result.instrumental = true;
+            return true;
+        }
         return false;
     };
 
@@ -6473,8 +6524,12 @@ LyricsLookup FetchLyricsFromLrclib(const std::wstring& title, const std::wstring
 
 DWORD WINAPI LyricsThreadProc(void*) {
     // Recently looked-up tracks, so skipping back and forth does not refetch.
-    // An empty vector caches "no synced lyrics for this track".
-    std::unordered_map<std::wstring, std::vector<LyricLine>> cache;
+    // No lines caches "no synced lyrics for this track" (or "instrumental").
+    struct CachedLyrics {
+        std::vector<LyricLine> lines;
+        bool instrumental = false;
+    };
+    std::unordered_map<std::wstring, CachedLyrics> cache;
     std::vector<std::wstring> cacheOrder;
     constexpr size_t kCacheMax = 30;
 
@@ -6547,8 +6602,10 @@ DWORD WINAPI LyricsThreadProc(void*) {
         }
 
         std::vector<LyricLine> lines;
+        bool instrumental = false;
         if (cached != cache.end()) {
-            lines = cached->second;
+            lines = cached->second.lines;
+            instrumental = cached->second.instrumental;
         } else {
             const int durationSec = static_cast<int>(std::lround(endTicks / 10000000.0));
             LyricsLookup lookup = FetchLyricsFromLrclib(title, artist, album, durationSec);
@@ -6592,14 +6649,16 @@ DWORD WINAPI LyricsThreadProc(void*) {
                 failedAttempts = 0;
                 pausedRetries = 0;
             }
-            Wh_Log(L"Lyrics: \"%s\" - %s: %d synced lines (%s)", title.c_str(), artist.c_str(),
-                   static_cast<int>(lookup.lines.size()), lookup.trace.c_str());
+            Wh_Log(L"Lyrics: \"%s\" - %s: %d synced lines%s (%s)", title.c_str(), artist.c_str(),
+                   static_cast<int>(lookup.lines.size()), lookup.instrumental ? L", instrumental" : L"",
+                   lookup.trace.c_str());
             lines = std::move(lookup.lines);
+            instrumental = lookup.instrumental;
             if (cache.size() >= kCacheMax && !cacheOrder.empty()) {
                 cache.erase(cacheOrder.front());
                 cacheOrder.erase(cacheOrder.begin());
             }
-            cache[key] = lines;
+            cache[key] = CachedLyrics{lines, instrumental};
             cacheOrder.push_back(key);
         }
 
@@ -6607,8 +6666,9 @@ DWORD WINAPI LyricsThreadProc(void*) {
             std::lock_guard lock(g_stateMutex);
             // The song may have changed while the request was in flight.
             if (g_state.lyrics.trackKey == key) {
-                g_state.lyrics.status = lines.empty() ? LyricsSnapshot::Status::NotFound
-                                                      : LyricsSnapshot::Status::Found;
+                g_state.lyrics.status = !lines.empty() ? LyricsSnapshot::Status::Found
+                                        : instrumental ? LyricsSnapshot::Status::Instrumental
+                                                       : LyricsSnapshot::Status::NotFound;
                 g_state.lyrics.lines = std::move(lines);
             }
         }
@@ -12503,8 +12563,16 @@ class Renderer {
                 // from whatever was showing before the alert.
                 lyricShownKey_.clear();
                 DrawInlineAlert(state, middle, settings);
+            } else if (TrackPeekActive(state, now)) {
+                // Marks the lyric as "after the peek", so the line being sung
+                // fades in when the peek ends instead of popping in.
+                lyricShownKey_ = kTrackPeekShownKey;
+                DrawTrackPeek(state, middle, now);
             } else {
                 DrawCollapsedLyrics(state, middle, now);
+                if (LyricsShowInstrumentalNote(state)) {
+                    DrawInstrumentalNote(state, middle, now);
+                }
             }
 
             target_->PopLayer();
@@ -12869,6 +12937,154 @@ class Renderer {
         target_->PopLayer();
     }
 
+    // "Now playing" peek (TrackPeekActive): title over artist in the middle of
+    // the collapsed pill, centred like a lyric line, fading in and out at the
+    // ends of the peek and with the width spring, as the lyrics do.
+    void DrawTrackPeek(const SharedState& state, D2D1_RECT_F area, double now) {
+        const float available = area.right - area.left;
+        const float widthAlpha = std::clamp((available - 60.0f) / 80.0f, 0.0f, 1.0f);
+        const double age = now - state.media.titleChangedAt;
+        const float fadeIn = static_cast<float>(std::clamp(age / 0.25, 0.0, 1.0));
+        const float fadeOut = static_cast<float>(std::clamp((kTrackPeekSeconds - age) / 0.35, 0.0, 1.0));
+        const float alpha = widthAlpha * std::min(fadeIn, fadeOut);
+        if (alpha < 0.01f || available <= 1.0f) {
+            return;
+        }
+
+        IDWriteTextFormat* titleFmt = boldTextFormat_ ? boldTextFormat_.Get() : textFormat_.Get();
+        IDWriteTextFormat* artistFmt = smallTextFormat_ ? smallTextFormat_.Get() : textFormat_.Get();
+        const std::wstring& title = state.media.title;
+        const std::wstring& artist = state.media.artist;
+        const float cy = (area.top + area.bottom) * 0.5f;
+        const bool twoLines = !artist.empty();
+
+        auto centredX = [&](const std::wstring& text, IDWriteTextFormat* fmt) {
+            const float w = MeasureTextWidth(text, fmt);
+            return area.left + std::max(0.0f, (available - w) * 0.5f);
+        };
+
+        textBrush_->SetOpacity(0.96f * alpha);
+        DrawTrimmedText(title, titleFmt, centredX(title, titleFmt), twoLines ? cy - 7.0f : cy,
+                        available, textBrush_.Get());
+        if (twoLines) {
+            mutedBrush_->SetOpacity(0.80f * alpha);
+            DrawTrimmedText(artist, artistFmt, centredX(artist, artistFmt), cy + 8.0f, available,
+                            mutedBrush_.Get());
+        }
+        textBrush_->SetOpacity(0.96f);
+        mutedBrush_->SetOpacity(0.75f);
+    }
+
+    // Track without lyrics (LyricsShowInstrumentalNote: LRCLIB marks it
+    // instrumental or has no synced lyrics for it): beamed eighth notes in the
+    // accent, in the middle of the normal-width pill. Sized from the lyric face
+    // that draws the single eighth note in a sung song's instrumental break,
+    // but a different shape and colour, so "no vocals" and "nobody is singing
+    // right now" read differently.
+    void DrawInstrumentalNote(const SharedState& state, D2D1_RECT_F area, double now) {
+        const float available = area.right - area.left;
+        const float widthAlpha = std::clamp((available - 8.0f) / 12.0f, 0.0f, 1.0f);
+        // Fades in as the peek fades out.
+        const double sincePeek = now - (state.media.titleChangedAt + kTrackPeekSeconds);
+        const float fadeIn = static_cast<float>(std::clamp(sincePeek / 0.30, 0.0, 1.0));
+        const float alpha = widthAlpha * fadeIn;
+        if (alpha < 0.01f) {
+            return;
+        }
+        IDWriteTextFormat* format = smallTextFormat_.Get();
+        ComPtr<ID2D1SolidColorBrush> brush;
+        target_->CreateSolidColorBrush(WithAlpha(currentAccent_, 0.95f * alpha * settingsOpacity_), &brush);
+        if (!format || !brush) {
+            return;
+        }
+        // Drawn rather than typed: Segoe UI renders U+266B with a double beam,
+        // which reads as sixteenth notes. The drawing is as tall as that glyph's
+        // ink at 1.3x the lyric face (a step above it, since at exactly its size
+        // the pair read smaller than the single note), so it keeps the size of
+        // the typed version.
+        constexpr float kNoteScale = 1.3f;
+        const float inkHeight = BeamedNoteGlyphInkHeight(format, format->GetFontSize() * kNoteScale);
+        DrawBeamedEighthNotes(D2D1::Point2F((area.left + area.right) * 0.5f, (area.top + area.bottom) * 0.5f),
+                              inkHeight / kBeamedEighthNotesHeight, brush.Get());
+    }
+
+    // Height of the inked part of U+266B in `format` at `fontSize`, cached per
+    // size (the format only changes with the Text size setting).
+    float BeamedNoteGlyphInkHeight(IDWriteTextFormat* format, float fontSize) {
+        if (std::fabs(noteInkFontSize_ - fontSize) < 0.01f && noteInkHeight_ > 0.0f) {
+            return noteInkHeight_;
+        }
+        float ink = fontSize * 0.75f;  // fallback: typical symbol ink vs. em
+        constexpr float kBox = 200.0f;
+        ComPtr<IDWriteTextLayout> layout;
+        if (dwriteFactory_ &&
+            SUCCEEDED(dwriteFactory_->CreateTextLayout(L"\u266B", 1, format, kBox, kBox, &layout)) && layout) {
+            layout->SetFontSize(fontSize, DWRITE_TEXT_RANGE{0, 1});
+            layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            DWRITE_OVERHANG_METRICS overhang{};
+            if (SUCCEEDED(layout->GetOverhangMetrics(&overhang))) {
+                // Overhangs are how far the ink pokes out of the box (negative
+                // when inside it), so the ink is the box minus both insets.
+                const float measured = kBox + overhang.top + overhang.bottom;
+                if (measured > 1.0f && measured < kBox) {
+                    ink = measured;
+                }
+            }
+        }
+        noteInkFontSize_ = fontSize;
+        noteInkHeight_ = ink;
+        return ink;
+    }
+
+    // Total height of DrawBeamedEighthNotes' drawing as a fraction of `size`:
+    // from the higher stem top (-0.50) to the bottom of the lower head (about
+    // +0.43 with its tilt).
+    static constexpr float kBeamedEighthNotesHeight = 0.93f;
+
+    // Two eighth notes joined by a single beam, `size` tall (about one em of
+    // the face it stands in for): tilted note heads, stems on their right, and
+    // one slanted beam across the stem tops.
+    void DrawBeamedEighthNotes(D2D1_POINT_2F c, float size, ID2D1Brush* brush) {
+        const float s = size;
+        const float headRx = 0.17f * s;
+        const float headRy = 0.125f * s;
+        const float stemW = std::max(1.0f, 0.075f * s);
+        const D2D1_POINT_2F heads[2] = {
+            D2D1::Point2F(c.x - 0.26f * s, c.y + 0.30f * s),
+            D2D1::Point2F(c.x + 0.26f * s, c.y + 0.22f * s),
+        };
+        const float stemTop[2] = {c.y - 0.42f * s, c.y - 0.50f * s};
+
+        D2D1_MATRIX_3X2_F old;
+        target_->GetTransform(&old);
+        for (int i = 0; i < 2; ++i) {
+            target_->SetTransform(D2D1::Matrix3x2F::Rotation(-22.0f, heads[i]) * old);
+            target_->FillEllipse(D2D1::Ellipse(heads[i], headRx, headRy), brush);
+        }
+        target_->SetTransform(old);
+
+        float stemX[2] = {};
+        for (int i = 0; i < 2; ++i) {
+            stemX[i] = heads[i].x + headRx * 0.85f;
+            target_->FillRectangle(D2D1::RectF(stemX[i] - stemW, stemTop[i], stemX[i], heads[i].y), brush);
+        }
+
+        ComPtr<ID2D1PathGeometry> beam;
+        if (d2dFactory_ && SUCCEEDED(d2dFactory_->CreatePathGeometry(&beam)) && beam) {
+            ComPtr<ID2D1GeometrySink> sink;
+            if (SUCCEEDED(beam->Open(&sink)) && sink) {
+                const float thick = 0.17f * s;
+                sink->BeginFigure(D2D1::Point2F(stemX[0] - stemW, stemTop[0]), D2D1_FIGURE_BEGIN_FILLED);
+                sink->AddLine(D2D1::Point2F(stemX[1], stemTop[1]));
+                sink->AddLine(D2D1::Point2F(stemX[1], stemTop[1] + thick));
+                sink->AddLine(D2D1::Point2F(stemX[0] - stemW, stemTop[0] + thick));
+                sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                sink->Close();
+                target_->FillGeometry(beam.Get(), brush);
+            }
+        }
+    }
+
     // The lyric line being sung, between the art and the waveform on the
     // collapsed pill. Only drawn when ActivityForKind widened the pill for it.
     void DrawCollapsedLyrics(const SharedState& state, D2D1_RECT_F area, double now) {
@@ -12896,11 +13112,13 @@ class Renderer {
         };
 
         if (state.lyrics.trackKey != lyricShownKey_) {
-            // New song: show its current line straight away, no crossfade.
+            // New song: show its current line straight away, no crossfade --
+            // except right after the track peek, where it fades in.
+            const bool afterPeek = lyricShownKey_ == kTrackPeekShownKey;
             lyricShownKey_ = state.lyrics.trackKey;
             lyricShownIndex_ = index;
             lyricPrevText_.clear();
-            lyricChangedAt_ = now - 1.0;
+            lyricChangedAt_ = afterPeek ? now : now - 1.0;
         } else if (index != lyricShownIndex_) {
             lyricPrevText_ = lineText(lyricShownIndex_);
             lyricShownIndex_ = index;
@@ -14582,6 +14800,10 @@ class Renderer {
     MarqueeLayoutCache lyricCache_;
     MarqueeLayoutCache lyricPrevCache_;
     std::wstring lyricShownKey_;
+    float noteInkFontSize_ = 0.0f;  // BeamedNoteGlyphInkHeight cache
+    float noteInkHeight_ = 0.0f;
+    // Not a real track key: those start with the (non-empty) title.
+    static constexpr const wchar_t* kTrackPeekShownKey = L"\x1fpeek";
     std::wstring lyricPrevText_;
     int lyricShownIndex_ = -2;
     double lyricChangedAt_ = 0.0;
@@ -14632,8 +14854,10 @@ Activity ActivityForKind(IslandKind kind, const Settings& settings, const Shared
             // Widen only while a lyric line is (about to be) sung; with lyrics
             // off, a track LRCLIB has no synced lyrics for, or an instrumental
             // stretch, the pill keeps its usual size.
-            activity.width = LyricsWantWidePill(state) ? MediaLayout::kCollapsedLyricsWidth
-                                                       : MediaLayout::kCollapsedWidth;
+            // The track peek after a song change widens it the same way.
+            activity.width = (LyricsWantWidePill(state) || TrackPeekActive(state, NowSeconds()))
+                                 ? MediaLayout::kCollapsedLyricsWidth
+                                 : MediaLayout::kCollapsedWidth;
             activity.height = 44.0f;
             break;
         case IslandKind::Progress:
