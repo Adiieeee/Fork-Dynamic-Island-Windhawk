@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.7.12
+// @version         1.7.13
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -271,7 +271,7 @@ We love community contributions! To ensure high-quality updates, please follow t
       - system: System (Device Accent)
   - ClockAccentGlow: true
     $name: Show clock background circle/glow
-    $description: Display the soft accent circle/glow behind the time in the expanded clock view. Turn off for a clean, minimal clock without background glow.
+    $description: Display the soft accent glow behind the analog clock face on the expanded Time tab. Turn off for a clean, minimal clock without background glow.
   - FontFamily: ""
     $name: Font family
     $description: Custom font family for island text (e.g. Segoe UI, Arial, Aptos, Consolas). Leave empty for system default.
@@ -788,6 +788,13 @@ namespace IdleStripLayout {
     constexpr float kDividerWidth = 1.0f;
     constexpr float kDividerInsetY = 9.0f;
 
+    // The weather slot is the accent-tinted vector icon used by the Date &
+    // Weather tab, then the temperature. The icon follows the Text size setting
+    // so it stays in proportion with the 13px * textScale idle face.
+    constexpr float kWeatherIconSize = 18.0f;
+    constexpr float kWeatherIconGap = 5.0f;
+    inline float WeatherIconSize(float textScale) { return kWeatherIconSize * textScale; }
+
     // Room reserved on the right for the mic/camera dot. DrawPrivacyDots anchors
     // it at rect.right - 20 with a 4px radius, so 18px clears it without letting
     // the text slide under it. Previously this was stolen from the text box while
@@ -805,6 +812,32 @@ namespace IdleStripLayout {
     // Measured widths are rounded up to this so sub-pixel text metrics can't
     // resize the layered window every frame.
     constexpr float kWidthQuantum = 2.0f;
+}
+
+// Layout for the idle card's Time tab. Shared by DrawTimeDashboard and the
+// minimize button's hit test in OverlayWndProc. Content space, unscaled, like
+// the other dashboards (drawn at scale 1).
+//
+// The insets are deliberately wider than the other tabs' (16 / 20 / 22): the
+// tab has few elements and reads calmer with air around them. The clock card
+// is the band's height, so on the 184px card it is a 124px square.
+namespace TimeLayout {
+    constexpr float kBandTop = 30.0f;
+    constexpr float kBandBottomInset = 30.0f;
+    constexpr float kCardLeft = 28.0f;
+    constexpr float kColGap = 26.0f;         // clock card -> right column
+    constexpr float kColRightInset = 30.0f;  // leaves room for the pagination dots
+    constexpr float kWeekStripHeight = 34.0f;
+    constexpr float kClockScale = 1.2f;      // digital clock vs. the 56px dashboard face
+
+    // The media card's minimize toggle (command 4), in the top-right corner of
+    // the right column, on the greeting's line. Without music the idle card is
+    // the only place to reach it.
+    constexpr float kMinimizeButtonRadius = 13.0f;
+    constexpr float kMinimizeButtonY = kBandTop + 9.0f;
+    inline float MinimizeButtonX(float width) {
+        return width - kColRightInset - kMinimizeButtonRadius;
+    }
 }
 
 // ── Media dashboard hit-test geometry ────────────────────────────────────────
@@ -1658,6 +1691,9 @@ const wchar_t* Loc(const wchar_t* english) {
         {L"Bluetooth", {nullptr, L"Bluetooth", L"Bluetooth", L"Bluetooth", L"Bluetooth", L"Bluetooth", L"Bluetooth", L"Bluetooth", L"ब्लूटूथ", L"蓝牙", L"Bluetooth", L"블루투스"}},
         {L"Copied", {nullptr, L"Copié", L"Copiado", L"Kopiert", L"Copiado", L"Copiato", L"Скопировано", L"Kopyalandı", L"कॉपी किया गया", L"已复制", L"コピーしました", L"복사됨"}},
         {L"Brightness", {nullptr, L"Luminosité", L"Brillo", L"Helligkeit", L"Brilho", L"Luminosità", L"Яркость", L"Parlaklık", L"चमक", L"亮度", L"明るさ", L"밝기"}},
+        {L"Good morning", {nullptr, L"Bonjour", L"Buenos días", L"Guten Morgen", L"Bom dia", L"Buongiorno", L"Доброе утро", L"Günaydın", L"सुप्रभात", L"早上好", L"おはようございます", L"좋은 아침이에요"}},
+        {L"Good afternoon", {nullptr, L"Bon après-midi", L"Buenas tardes", L"Guten Tag", L"Boa tarde", L"Buon pomeriggio", L"Добрый день", L"Tünaydın", L"शुभ दोपहर", L"下午好", L"こんにちは", L"좋은 오후예요"}},
+        {L"Good evening", {nullptr, L"Bonsoir", L"Buenas noches", L"Guten Abend", L"Boa noite", L"Buonasera", L"Добрый вечер", L"İyi akşamlar", L"शुभ संध्या", L"晚上好", L"こんばんは", L"좋은 저녁이에요"}},
         {L"Volume", {nullptr, L"Volume", L"Volumen", L"Lautstärke", L"Volume", L"Volume", L"Громкость", L"Ses", L"वॉल्यूम", L"音量", L"音量", L"볼륨"}},
         {L"Muted", {nullptr, L"Muet", L"Silenciado", L"Stumm", L"Sem som", L"Muto", L"Без звука", L"Sessiz", L"म्यूट", L"已静音", L"ミュート", L"음소거"}},
         {L"Low Battery", {nullptr, L"Batterie faible", L"Batería baja", L"Akku schwach", L"Bateria fraca", L"Batteria scarica", L"Батарея разряжена", L"Pil Az", L"बैटरी कम", L"电量低", L"バッテリー残量低下", L"배터리 부족"}},
@@ -1804,6 +1840,17 @@ int MediaTransportHitTest(const MediaContentPoint& pt) {
         }
     }
     return -1;
+}
+
+// True when a content-space point is on the idle Time tab's minimize button.
+// The caller checks that the idle card is the one on screen (IdleTimeTabShown).
+bool IdleMinimizeButtonHitTest(const MediaContentPoint& pt) {
+    if (!pt.valid || pt.height <= MediaLayout::kExpandedMinHeight) {
+        return false;
+    }
+    const float reach = TimeLayout::kMinimizeButtonRadius + MediaLayout::kControlHitPad;
+    return std::fabs(pt.x - TimeLayout::MinimizeButtonX(pt.width)) <= reach &&
+           std::fabs(pt.y - TimeLayout::kMinimizeButtonY) <= reach;
 }
 
 // Fraction along the scrubber bar (0..1) for a content-space point, or -1 when
@@ -9518,14 +9565,12 @@ class Renderer {
             const bool hasData = state.weather.hasData && (now - state.weather.lastUpdated < 3600.0);
             wchar_t label[32] = {};
             if (hasData) {
-                std::wstring icon = L"\U0001F321\uFE0F";
-                std::wstring desc = state.weather.weatherDesc;
-                GetWeatherIconAndText(state.weather.weatherCode, icon, desc);
-                swprintf_s(label, L"%s %.0f\x00B0", icon.c_str(), state.weather.temperature);
+                swprintf_s(label, L"%.0f\x00B0", state.weather.temperature);
             } else {
-                wcscpy_s(label, ARRAYSIZE(label), L"\U0001F321\uFE0F --\x00B0");
+                wcscpy_s(label, ARRAYSIZE(label), L"--\x00B0");
             }
             metrics.weatherWidth =
+                IdleStripLayout::WeatherIconSize(settings.textScale) + IdleStripLayout::kWeatherIconGap +
                 MeasureTextWidthCached(WidestDigitForm(label), fmt, idleWeatherWidthCache_);
         }
 
@@ -10554,14 +10599,16 @@ class Renderer {
                                        hero.right, hero.bottom - 29.0f * scale),
                            textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
 
-        mutedBrush_->SetOpacity(0.70f);
+        // Weekday in the text colour: the muted grey it used to take was hard
+        // to read against the card.
+        textBrush_->SetOpacity(0.88f);
         if (boldTextFormat_) {
             target_->DrawTextW(calendarCachedWeekdayName_.c_str(),
                                static_cast<UINT32>(calendarCachedWeekdayName_.size()),
                                boldTextFormat_.Get(),
                                D2D1::RectF(hero.left + 4.0f * scale, hero.bottom - 28.0f * scale,
                                            hero.right - 4.0f * scale, hero.bottom - 10.0f * scale),
-                               mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                               textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
         return accent;
@@ -11549,72 +11596,199 @@ class Renderer {
         mutedBrush_->SetOpacity(0.75f);
     }
 
-    void DrawTimeDashboard(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now, float scale, SYSTEMTIME& local) {
-        (void)now;
+    // Mutes the AM/PM marker of a formatted clock and optionally shrinks it,
+    // leaving the digits alone. The marker is found as the span of letters
+    // rather than by pattern, because with Follow system the locale decides
+    // where it goes ("3:41 PM", "오후 3:41", "下午3:41").
+    void StyleClockDayPeriod(IDWriteTextLayout* layout, const std::wstring& text, float sizeRatio) {
+        if (!layout) return;
+        size_t first = std::wstring::npos;
+        size_t last = 0;
+        for (size_t i = 0; i < text.size(); ++i) {
+            if (IsCharAlphaW(text[i])) {
+                if (first == std::wstring::npos) first = i;
+                last = i;
+            }
+        }
+        if (first == std::wstring::npos) return;
 
-        const float cx = (rect.left + rect.right) * 0.5f;
-        const float cy = (rect.top + rect.bottom) * 0.5f;
+        const DWRITE_TEXT_RANGE range{static_cast<UINT32>(first), static_cast<UINT32>(last - first + 1)};
+        layout->SetDrawingEffect(mutedBrush_.Get(), range);
+        if (sizeRatio < 0.999f) {
+            FLOAT size = 0.0f;
+            if (SUCCEEDED(layout->GetFontSize(range.startPosition, &size)) && size > 0.0f) {
+                layout->SetFontSize(size * sizeRatio, range);
+            }
+        }
+    }
+
+    // Time tab, the first page of the idle card. Built from the same parts as
+    // the Date & Weather and Hardware tabs: an analog clock in a square card
+    // on the left (where the date hero sits on Date & Weather), and a column on
+    // the right with a large digital clock over this week's dates, today on an
+    // accent disc like the calendar's marker. The date itself is the Date &
+    // Weather tab's job. While the camera or microphone is in use, the week
+    // gives way to a badge naming the app.
+    void DrawTimeDashboard(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now, float scale, SYSTEMTIME& local) {
+        const float bandTop = rect.top + TimeLayout::kBandTop * scale;
+        const float bandBottom = rect.bottom - TimeLayout::kBandBottomInset * scale;
+        const float cardRadius = InsetCardRadius(rect, scale);
+
+        ComPtr<ID2D1SolidColorBrush> accentBrush;
+        target_->CreateSolidColorBrush(WithAlpha(material_.accent, 0.95f * settingsOpacity_), &accentBrush);
+        ComPtr<ID2D1SolidColorBrush> handBrush;
+        target_->CreateSolidColorBrush(WithAlpha(material_.textPrimary, 0.95f * settingsOpacity_), &handBrush);
+        ComPtr<ID2D1SolidColorBrush> tickStrong;
+        target_->CreateSolidColorBrush(WithAlpha(material_.textPrimary, 0.70f * settingsOpacity_), &tickStrong);
+        ComPtr<ID2D1SolidColorBrush> tickSoft;
+        target_->CreateSolidColorBrush(WithAlpha(material_.textPrimary, 0.26f * settingsOpacity_), &tickSoft);
+
+        ComPtr<ID2D1StrokeStyle> roundStroke;
+        if (d2dFactory_) {
+            d2dFactory_->CreateStrokeStyle(
+                D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND),
+                nullptr, 0, &roundStroke);
+        }
+
+        // ── Clock card ───────────────────────────────────────────────────────
+        const float cardSide = bandBottom - bandTop;
+        const D2D1_RECT_F card = D2D1::RectF(rect.left + TimeLayout::kCardLeft * scale, bandTop,
+                                             rect.left + TimeLayout::kCardLeft * scale + cardSide, bandBottom);
+        DrawCard(card, cardRadius);
+
+        const D2D1_POINT_2F c = D2D1::Point2F((card.left + card.right) * 0.5f, (card.top + card.bottom) * 0.5f);
+        const float faceR = cardSide * 0.5f - 12.0f * scale;
 
         if (settings.clockAccentGlow) {
-            D2D1_COLOR_F accentColor = accentBrush_ ? accentBrush_->GetColor() : D2D1::ColorF(0x4cc9f0);
+            const D2D1_COLOR_F glow = material_.accent;
             D2D1_GRADIENT_STOP stops[2] = {
-                {0.0f, D2D1::ColorF(accentColor.r, accentColor.g, accentColor.b, 0.24f)},
-                {1.0f, D2D1::ColorF(accentColor.r, accentColor.g, accentColor.b, 0.0f)},
+                {0.0f, D2D1::ColorF(glow.r, glow.g, glow.b, 0.22f * settingsOpacity_)},
+                {1.0f, D2D1::ColorF(glow.r, glow.g, glow.b, 0.0f)},
             };
             ComPtr<ID2D1GradientStopCollection> glowStops;
             target_->CreateGradientStopCollection(stops, 2, &glowStops);
-
+            ComPtr<ID2D1RadialGradientBrush> glowBrush;
             if (glowStops) {
-                const D2D1_POINT_2F glowCenter = D2D1::Point2F(cx, cy - 8.0f * scale);
-                ComPtr<ID2D1RadialGradientBrush> glowBrush;
+                const float glowR = faceR + 10.0f * scale;
                 target_->CreateRadialGradientBrush(
-                    D2D1::RadialGradientBrushProperties(glowCenter, D2D1::Point2F(0, 0),
-                                                         150.0f * scale, 70.0f * scale),
+                    D2D1::RadialGradientBrushProperties(c, D2D1::Point2F(0, 0), glowR, glowR),
                     glowStops.Get(), &glowBrush);
                 if (glowBrush) {
-                    target_->FillEllipse(D2D1::Ellipse(glowCenter, 150.0f * scale, 70.0f * scale), glowBrush.Get());
+                    target_->FillEllipse(D2D1::Ellipse(c, glowR, glowR), glowBrush.Get());
                 }
             }
         }
 
-        // Time and date as a single typographic block. `dateFirst` promotes the
-        // date to the headline for people who care about it more than the clock
-        // (#61); either way the pair stays optically centred as a unit.
+        // Clockwise from 12 o'clock.
+        auto onFace = [&](float degrees, float radius) {
+            const float a = degrees * 3.14159265f / 180.0f;
+            return D2D1::Point2F(c.x + std::sin(a) * radius, c.y - std::cos(a) * radius);
+        };
+
+        // Hour marks, the quarters longer and brighter.
+        for (int i = 0; i < 12; ++i) {
+            const bool quarter = (i % 3) == 0;
+            const float angle = static_cast<float>(i) * 30.0f;
+            const float inner = faceR - (quarter ? 7.0f : 4.0f) * scale;
+            ID2D1SolidColorBrush* brush = quarter ? tickStrong.Get() : tickSoft.Get();
+            if (brush) {
+                target_->DrawLine(onFace(angle, inner), onFace(angle, faceR), brush,
+                                  (quarter ? 2.4f : 1.6f) * scale, roundStroke.Get());
+            }
+        }
+
+        // Hands. The render loop repaints once a second while this tab is
+        // shown, so the second hand ticks like a quartz movement.
+        const float sec = static_cast<float>(local.wSecond);
+        const float minute = static_cast<float>(local.wMinute) + sec / 60.0f;
+        const float hour = static_cast<float>(local.wHour % 12) + minute / 60.0f;
+        if (handBrush) {
+            target_->DrawLine(c, onFace(hour * 30.0f, faceR * 0.50f), handBrush.Get(), 4.6f * scale, roundStroke.Get());
+            target_->DrawLine(c, onFace(minute * 6.0f, faceR * 0.76f), handBrush.Get(), 3.0f * scale, roundStroke.Get());
+        }
+        if (accentBrush) {
+            target_->DrawLine(onFace(sec * 6.0f + 180.0f, faceR * 0.16f), onFace(sec * 6.0f, faceR * 0.86f),
+                              accentBrush.Get(), 1.5f * scale, roundStroke.Get());
+            target_->FillEllipse(D2D1::Ellipse(c, 4.0f * scale, 4.0f * scale), accentBrush.Get());
+        }
+        ComPtr<ID2D1SolidColorBrush> pinBrush;
+        target_->CreateSolidColorBrush(WithAlpha(material_.base, 0.95f * settingsOpacity_), &pinBrush);
+        if (pinBrush) {
+            target_->FillEllipse(D2D1::Ellipse(c, 1.6f * scale, 1.6f * scale), pinBrush.Get());
+        }
+
+        // ── Right column ─────────────────────────────────────────────────────
+        // The right inset leaves room for the pagination dots.
+        const float colLeft = card.right + TimeLayout::kColGap * scale;
+        const float colRight = rect.right - TimeLayout::kColRightInset * scale;
+        const float colWidth = std::max(1.0f, colRight - colLeft);
+
+        // An accent label over the digital clock: a greeting for the time of
+        // day. The date is left to the Date & Weather tab, except with
+        // `dateFirst` (#61), which asks for it and takes the label's place.
         const std::wstring timeText = FormatIslandTime(local, settings.clockFollowSystem,
                                                        settings.use24HourClock, settings.showSeconds);
-        const std::wstring dateText = FormatIslandDate(local, settings.dateFormat, L"dddd, MMMM d");
+        const D2D1_RECT_F stripRect = D2D1::RectF(colLeft, bandBottom - TimeLayout::kWeekStripHeight * scale,
+                                                  colRight, bandBottom);
+        float headTop = bandTop;
 
-        IDWriteTextFormat* bigFmt = timeDashboardFormat_ ? timeDashboardFormat_.Get() : hugeTextFormat_.Get();
-        IDWriteTextFormat* smallFmt = dateDashboardFormat_ ? dateDashboardFormat_.Get() : boldTextFormat_.Get();
+        // Minimize toggle on the greeting's line (see TimeLayout).
+        const float minimizeX = rect.left + TimeLayout::MinimizeButtonX((rect.right - rect.left) / scale) * scale;
+        UpdateMediaButtonAnimations(now);
+        DrawMinimizeToggleButton(D2D1::Point2F(minimizeX, rect.top + TimeLayout::kMinimizeButtonY * scale),
+                                 TimeLayout::kMinimizeButtonRadius * scale);
+        const float labelRight = minimizeX - (TimeLayout::kMinimizeButtonRadius + 6.0f) * scale;
 
-        const std::wstring& headline = settings.dateFirst ? dateText : timeText;
-        const std::wstring& subline = settings.dateFirst ? timeText : dateText;
-        IDWriteTextFormat* headlineFmt = settings.dateFirst ? smallFmt : bigFmt;
-        IDWriteTextFormat* sublineFmt = settings.dateFirst ? bigFmt : smallFmt;
-
-        if (settings.dateFirst) {
-            // Date on top reads as a label, so give the big clock the lower slot.
-            const D2D1_RECT_F headRect = D2D1::RectF(rect.left, cy - 46.0f * scale, rect.right, cy - 22.0f * scale);
-            textBrush_->SetOpacity(0.92f);
-            target_->DrawTextW(headline.c_str(), static_cast<UINT32>(headline.size()), headlineFmt,
-                               headRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
-
-            const D2D1_RECT_F subRect = D2D1::RectF(rect.left, cy - 20.0f * scale, rect.right, cy + 44.0f * scale);
-            textBrush_->SetOpacity(0.98f);
-            target_->DrawTextW(subline.c_str(), static_cast<UINT32>(subline.size()), sublineFmt,
-                               subRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
-        } else {
-            const D2D1_RECT_F headRect = D2D1::RectF(rect.left, cy - 44.0f * scale, rect.right, cy + 20.0f * scale);
-            textBrush_->SetOpacity(0.98f);
-            target_->DrawTextW(headline.c_str(), static_cast<UINT32>(headline.size()), headlineFmt,
-                               headRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
-
-            const D2D1_RECT_F subRect = D2D1::RectF(rect.left, cy + 22.0f * scale, rect.right, cy + 46.0f * scale);
-            mutedBrush_->SetOpacity(0.85f);
-            target_->DrawTextW(subline.c_str(), static_cast<UINT32>(subline.size()), sublineFmt,
-                               subRect, mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+        if (boldTextFormat_ && accentBrush) {
+            const wchar_t* greeting = (local.wHour >= 5 && local.wHour < 12)  ? Loc(L"Good morning")
+                                      : (local.wHour >= 12 && local.wHour < 18) ? Loc(L"Good afternoon")
+                                                                                : Loc(L"Good evening");
+            const std::wstring labelText = settings.dateFirst
+                ? FormatIslandDate(local, settings.dateFormat, L"dddd, MMMM d")
+                : std::wstring(greeting);
+            const DWRITE_TEXT_ALIGNMENT prevAlign = boldTextFormat_->GetTextAlignment();
+            const DWRITE_PARAGRAPH_ALIGNMENT prevPara = boldTextFormat_->GetParagraphAlignment();
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            boldTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            target_->DrawTextW(labelText.c_str(), static_cast<UINT32>(labelText.size()), boldTextFormat_.Get(),
+                               D2D1::RectF(colLeft, bandTop, std::max(colLeft, labelRight), bandTop + 18.0f * scale),
+                               accentBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            boldTextFormat_->SetTextAlignment(prevAlign);
+            boldTextFormat_->SetParagraphAlignment(prevPara);
+            headTop += 18.0f * scale;
         }
-        textBrush_->SetOpacity(0.98f);
+
+        // TimeLayout::kClockScale x the 56px dashboard face, shrunk to fit the column when the
+        // string runs long (seconds, AM/PM); the AM/PM marker is smaller and
+        // muted beside the digits.
+        IDWriteTextFormat* bigFmt = timeDashboardFormat_ ? timeDashboardFormat_.Get() : hugeTextFormat_.Get();
+        const float headBottom = stripRect.top - 2.0f * scale;
+        ComPtr<IDWriteTextLayout> headLayout;
+        if (bigFmt && dwriteFactory_ &&
+            SUCCEEDED(dwriteFactory_->CreateTextLayout(timeText.c_str(), static_cast<UINT32>(timeText.size()),
+                                                       bigFmt, colWidth, headBottom - headTop, &headLayout)) &&
+            headLayout) {
+            headLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            headLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            headLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            const DWRITE_TEXT_RANGE all{0, static_cast<UINT32>(timeText.size())};
+            float size = bigFmt->GetFontSize() * TimeLayout::kClockScale;
+            constexpr float kDayPeriodRatio = 0.40f;
+
+            mutedBrush_->SetOpacity(0.70f);
+            headLayout->SetFontSize(size, all);
+            StyleClockDayPeriod(headLayout.Get(), timeText, kDayPeriodRatio);
+            DWRITE_TEXT_METRICS tm = {};
+            if (SUCCEEDED(headLayout->GetMetrics(&tm)) && tm.widthIncludingTrailingWhitespace > colWidth) {
+                size *= colWidth / tm.widthIncludingTrailingWhitespace;
+                headLayout->SetFontSize(size, all);
+                StyleClockDayPeriod(headLayout.Get(), timeText, kDayPeriodRatio);
+            }
+            textBrush_->SetOpacity(0.98f);
+            target_->DrawTextLayout(D2D1::Point2F(colLeft, headTop), headLayout.Get(), textBrush_.Get(),
+                                    D2D1_DRAW_TEXT_OPTIONS_NONE);
+            mutedBrush_->SetOpacity(0.75f);
+        }
 
         const bool micActive = state.system.micActive && settings.privacyDots && settings.privacyDotsMic;
         const bool camActive = state.system.cameraActive && settings.privacyDots && settings.privacyDotsCam;
@@ -11652,45 +11826,102 @@ class Renderer {
                 }
             }
 
-            IDWriteTextFormat* fmt = smallTextFormat_ ? smallTextFormat_.Get() : textFormat_.Get();
-            if (fmt && dwriteFactory_) {
-                ComPtr<IDWriteTextLayout> textLayout;
-                HRESULT hr = dwriteFactory_->CreateTextLayout(
-                    label.c_str(), static_cast<UINT32>(label.size()),
-                    fmt, 500.0f, 30.0f, &textLayout);
+            // A chip as wide as the column, in the week strip's place.
+            const float chipH = 28.0f * scale;
+            const D2D1_RECT_F chip = D2D1::RectF(colLeft, stripRect.bottom - chipH, colRight, stripRect.bottom);
+            DrawCard(chip, std::min(cardRadius * 0.5f, chipH * 0.5f));
 
-                if (SUCCEEDED(hr) && textLayout) {
-                    DWRITE_TEXT_METRICS tm = {};
-                    textLayout->GetMetrics(&tm);
+            ComPtr<ID2D1SolidColorBrush> dotBrush;
+            dotColor.a = settingsOpacity_;
+            target_->CreateSolidColorBrush(dotColor, &dotBrush);
+            if (dotBrush) {
+                target_->FillEllipse(
+                    D2D1::Ellipse(D2D1::Point2F(chip.left + 13.0f * scale, (chip.top + chip.bottom) * 0.5f),
+                                  3.5f * scale, 3.5f * scale),
+                    dotBrush.Get());
+            }
 
-                    const float pillH = 22.0f * scale;
-                    const float pillW = tm.width + 28.0f * scale;
-                    const float pillX = cx - pillW * 0.5f;
-                    const float pillY = rect.bottom - 18.0f * scale - pillH;
+            if (smallTextFormat_) {
+                const DWRITE_TEXT_ALIGNMENT prevAlign = smallTextFormat_->GetTextAlignment();
+                const DWRITE_PARAGRAPH_ALIGNMENT prevPara = smallTextFormat_->GetParagraphAlignment();
+                smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                mutedBrush_->SetOpacity(0.90f);
+                target_->DrawTextW(label.c_str(), static_cast<UINT32>(label.size()), smallTextFormat_.Get(),
+                                   D2D1::RectF(chip.left + 23.0f * scale, chip.top, chip.right - 8.0f * scale, chip.bottom),
+                                   mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                smallTextFormat_->SetTextAlignment(prevAlign);
+                smallTextFormat_->SetParagraphAlignment(prevPara);
+            }
+        } else {
+            // ── This week ────────────────────────────────────────────────────
+            // Sunday first, like the calendar grid. Day initials come from the
+            // locale (LOCALE_SSHORTESTDAYNAME*), so they follow the Windows
+            // language as the month and weekday names do. Plain text on the
+            // card's own fill, like the calendar grid: initials above, dates
+            // below, today's date on an accent disc (the calendar's marker).
+            constexpr int kDays = 7;
+            const float cellW = colWidth / static_cast<float>(kDays);
+            const float initialH = 13.0f * scale;
+            IDWriteTextFormat* numFmt = calGridFormat_ ? calGridFormat_.Get() : boldTextFormat_.Get();
 
-                    ComPtr<ID2D1SolidColorBrush> badgeBg;
-                    target_->CreateSolidColorBrush(WithAlpha(material_.raised, material_.raised.a * settingsOpacity_), &badgeBg);
-                    if (badgeBg) {
-                        target_->FillRoundedRectangle(
-                            D2D1::RoundedRect(D2D1::RectF(pillX, pillY, pillX + pillW, pillY + pillH), pillH * 0.5f, pillH * 0.5f),
-                            badgeBg.Get());
-                    }
+            FILETIME todayFt = {};
+            SystemTimeToFileTime(&local, &todayFt);
+            ULARGE_INTEGER todayTicks{};
+            todayTicks.LowPart = todayFt.dwLowDateTime;
+            todayTicks.HighPart = todayFt.dwHighDateTime;
+            constexpr ULONGLONG kTicksPerDay = 864000000000ULL;
 
-                    ComPtr<ID2D1SolidColorBrush> dotBrush;
-                    dotColor.a = settingsOpacity_;
-                    target_->CreateSolidColorBrush(dotColor, &dotBrush);
-                    if (dotBrush) {
-                        const float badgeDotR = 3.5f * scale;
-                        target_->FillEllipse(
-                            D2D1::Ellipse(D2D1::Point2F(pillX + 10.0f * scale, pillY + pillH * 0.5f), badgeDotR, badgeDotR),
-                            dotBrush.Get());
-                    }
+            for (int i = 0; i < kDays; ++i) {
+                const int offset = i - static_cast<int>(local.wDayOfWeek);
+                ULARGE_INTEGER ticks = todayTicks;
+                ticks.QuadPart += static_cast<LONGLONG>(offset) * static_cast<LONGLONG>(kTicksPerDay);
+                FILETIME ft{ticks.LowPart, ticks.HighPart};
+                SYSTEMTIME day = {};
+                if (!FileTimeToSystemTime(&ft, &day)) continue;
 
-                    mutedBrush_->SetOpacity(0.90f);
-                    target_->DrawTextLayout(
-                        D2D1::Point2F(pillX + 18.0f * scale, pillY + (pillH - tm.height) * 0.5f),
-                        textLayout.Get(), mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
-                    mutedBrush_->SetOpacity(0.75f);
+                const D2D1_RECT_F cell = D2D1::RectF(colLeft + cellW * i, stripRect.top,
+                                                     colLeft + cellW * (i + 1), stripRect.bottom);
+                const bool isToday = (offset == 0);
+                const bool weekend = (i == 0 || i == kDays - 1);
+
+                // Sunday is LOCALE_SSHORTESTDAYNAME7; Monday..Saturday are 1..6.
+                const LCTYPE nameType = (i == 0) ? LOCALE_SSHORTESTDAYNAME7
+                                                 : static_cast<LCTYPE>(LOCALE_SSHORTESTDAYNAME1 + (i - 1));
+                wchar_t initial[16] = {};
+                if (GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, nameType, initial, ARRAYSIZE(initial)) <= 0) {
+                    static const wchar_t* const kFallback[kDays] = {L"S", L"M", L"T", L"W", L"T", L"F", L"S"};
+                    wcscpy_s(initial, kFallback[i]);
+                }
+
+                const D2D1_RECT_F initialRect = D2D1::RectF(cell.left, cell.top, cell.right, cell.top + initialH);
+                const D2D1_RECT_F numRect = D2D1::RectF(cell.left, cell.top + initialH, cell.right, cell.bottom);
+                if (isToday && accentBrush) {
+                    const float markerR = std::min(cellW, numRect.bottom - numRect.top) * 0.5f - 0.5f * scale;
+                    target_->FillEllipse(
+                        D2D1::Ellipse(D2D1::Point2F((numRect.left + numRect.right) * 0.5f,
+                                                    (numRect.top + numRect.bottom) * 0.5f),
+                                      markerR, markerR),
+                        accentBrush.Get());
+                }
+                if (smallTextFormat_) {
+                    const DWRITE_TEXT_ALIGNMENT prevAlign = smallTextFormat_->GetTextAlignment();
+                    const DWRITE_PARAGRAPH_ALIGNMENT prevPara = smallTextFormat_->GetParagraphAlignment();
+                    smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                    smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    ID2D1SolidColorBrush* brush = (isToday && accentBrush) ? accentBrush.Get() : mutedBrush_.Get();
+                    if (!isToday) brush->SetOpacity(0.70f);
+                    target_->DrawTextW(initial, static_cast<UINT32>(wcslen(initial)), smallTextFormat_.Get(),
+                                       initialRect, brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                    smallTextFormat_->SetTextAlignment(prevAlign);
+                    smallTextFormat_->SetParagraphAlignment(prevPara);
+                }
+                if (numFmt) {
+                    const std::wstring dayText = std::to_wstring(day.wDay);
+                    ID2D1SolidColorBrush* brush = (isToday || !weekend) ? textBrush_.Get() : mutedBrush_.Get();
+                    brush->SetOpacity(isToday ? 1.0f : (weekend ? 0.62f : 0.88f));
+                    target_->DrawTextW(dayText.c_str(), static_cast<UINT32>(dayText.size()), numFmt,
+                                       numRect, brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
                 }
             }
         }
@@ -11804,11 +12035,21 @@ class Renderer {
             // Each slot is exactly its measured width, and the measurement used the
             // widest-digit form, so the live string is centred inside a box it is
             // guaranteed to fit rather than drifting as the digits change.
+            // The AM/PM marker recedes to the muted colour, as on the Time tab.
+            // Same face and size, so the measured width still holds.
             textBrush_->SetOpacity(0.96f);
-            const D2D1_RECT_F timeRect =
-                D2D1::RectF(slotX, rect.top, slotX + idleMetrics.clockWidth, rect.bottom);
-            target_->DrawTextW(timeBuf, static_cast<UINT32>(wcslen(timeBuf)), idleFmt,
-                               timeRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            mutedBrush_->SetOpacity(0.70f);
+            ComPtr<IDWriteTextLayout> timeLayout;
+            if (idleFmt && dwriteFactory_ &&
+                SUCCEEDED(dwriteFactory_->CreateTextLayout(
+                    timeBuf, static_cast<UINT32>(wcslen(timeBuf)), idleFmt,
+                    std::max(1.0f, idleMetrics.clockWidth), rect.bottom - rect.top, &timeLayout)) &&
+                timeLayout) {
+                StyleClockDayPeriod(timeLayout.Get(), collapsedTime, 1.0f);
+                target_->DrawTextLayout(D2D1::Point2F(slotX, rect.top), timeLayout.Get(),
+                                        textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            }
+            mutedBrush_->SetOpacity(0.75f);
             slotX += idleMetrics.clockWidth;
 
             if (idleMetrics.hasWeather) {
@@ -11828,14 +12069,30 @@ class Renderer {
                 }
                 slotX += (IdleStripLayout::kDividerWidth + IdleStripLayout::kSlotGap) * scale;
 
+                // Vector icon in the accent, the same artwork as the Date &
+                // Weather tab, instead of a colour emoji that ignored the theme.
+                const float iconSize = IdleStripLayout::WeatherIconSize(settings.textScale) * scale;
+                ComPtr<ID2D1SolidColorBrush> iconStrong;
+                ComPtr<ID2D1SolidColorBrush> iconSoft;
+                target_->CreateSolidColorBrush(WithAlpha(material_.accent, 0.95f * settingsOpacity_), &iconStrong);
+                target_->CreateSolidColorBrush(WithAlpha(material_.accent, 0.55f * settingsOpacity_), &iconSoft);
+                if (iconStrong && iconSoft) {
+                    DrawWeatherIcon(D2D1::Point2F(slotX + iconSize * 0.5f, (rect.top + rect.bottom) * 0.5f),
+                                    iconSize,
+                                    hasWeather ? WeatherVisualFromCode(state.weather.weatherCode)
+                                               : WeatherVisual::Unknown,
+                                    iconStrong.Get(), iconSoft.Get());
+                }
+                const float tempLeft = slotX + iconSize + IdleStripLayout::kWeatherIconGap * scale;
+
                 wchar_t weatherLabel[32] = {};
-                if (hasWeather) swprintf_s(weatherLabel, L"%s %.0f\x00B0", wIcon.c_str(), state.weather.temperature);
-                else wcscpy_s(weatherLabel, ARRAYSIZE(weatherLabel), L"\U0001F321\uFE0F --\x00B0");
+                if (hasWeather) swprintf_s(weatherLabel, L"%.0f\x00B0", state.weather.temperature);
+                else wcscpy_s(weatherLabel, ARRAYSIZE(weatherLabel), L"--\x00B0");
 
                 const D2D1_RECT_F wRect =
-                    D2D1::RectF(slotX, rect.top, slotX + idleMetrics.weatherWidth, rect.bottom);
+                    D2D1::RectF(tempLeft, rect.top, slotX + idleMetrics.weatherWidth, rect.bottom);
                 target_->DrawTextW(weatherLabel, static_cast<UINT32>(wcslen(weatherLabel)), idleFmt,
-                                   wRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+                                   wRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
             textBrush_->SetOpacity(1.0f);
 
@@ -14536,6 +14793,30 @@ std::vector<IslandKind> ChooseActivities(const SharedState& state, const Setting
     return activities;
 }
 
+// Whether the idle card's Time tab is what the island is showing: no music
+// pill, nothing but Idle chosen, and the first tab selected.
+bool IdleTimeTabShown() {
+    if (NormalizedTabIndex(g_settings) != 0) {
+        return false;
+    }
+    std::lock_guard lock(g_stateMutex);
+    if (MediaPillShown(g_state, g_settings)) {
+        return false;
+    }
+    const std::vector<IslandKind> kinds = ChooseActivities(g_state, g_settings, NowSeconds());
+    return !kinds.empty() && kinds[0] == IslandKind::Idle;
+}
+
+// Minimize toggle (command 4), from the media card or the idle Time tab. The
+// cursor is still over the card, so it stays open until the mouse leaves and
+// then settles into the line.
+void ToggleIslandMinimized() {
+    const bool minimize = !g_islandMinimized.load();
+    g_islandMinimized = minimize;
+    Wh_SetIntValue(L"IslandMinimized", minimize ? 1 : 0);
+    g_layoutDirty = true;
+}
+
 constexpr UINT WM_APP_CAPSLOCK = WM_APP + 0x444;
 // A volume key the hook swallowed: wParam = vk, lParam = 1 if it was injected
 // (e.g. sent by an OEM hotkey utility for Fn + F keys).
@@ -15015,6 +15296,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     }
                 }
 
+                if (!mediaActive && currentTab == 0 &&
+                    IdleMinimizeButtonHitTest(MediaContentFromClient(pt.x, pt.y)) && IdleTimeTabShown()) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+
                 // A File Tray row under the cursor is clickable (opens the file).
                 if (g_settings.fileTrayModule && currentTab == FileTrayTabIndex(g_settings) &&
                     g_hoveredFileTrayRow.load(std::memory_order_relaxed) >= 0) {
@@ -15040,6 +15327,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
 
                 const int currentTab = NormalizedTabIndex(g_settings);
+                if (!mediaActive && currentTab == 0 &&
+                    IdleMinimizeButtonHitTest(MediaContentFromClient(xPos, yPos)) && IdleTimeTabShown()) {
+                    g_pressedMediaButton = 4;
+                    SetCapture(hwnd);
+                    g_layoutDirty = true;
+                    return 0;
+                }
                 if (mediaActive && currentTab == 0) {
                     const MediaContentPoint cp = MediaContentFromClient(xPos, yPos);
 
@@ -15108,6 +15402,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             if (mediaActive && currentTab == 0) {
                 hovered = MediaTransportHitTest(MediaContentFromClient(xPos, yPos));
+            } else if (currentTab == 0 && IdleMinimizeButtonHitTest(MediaContentFromClient(xPos, yPos)) &&
+                       IdleTimeTabShown()) {
+                hovered = 4;
             }
 
             if (g_hoveredMediaButton.exchange(hovered) != hovered) {
@@ -15299,6 +15596,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     return 0;
                 }
 
+                // Idle Time tab: the same minimize toggle as the media card.
+                if (!mediaActive && currentTab == 0 && IdleMinimizeButtonHitTest(cp) && IdleTimeTabShown()) {
+                    ToggleIslandMinimized();
+                    return 0;
+                }
+
                 if (mediaActive && currentTab == 0) {
                     const int cmd = MediaTransportHitTest(cp);
                     if (cmd == 3) {
@@ -15310,13 +15613,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         return 0;
                     }
                     if (cmd == 4) {
-                        // Minimize toggle, also local to the island. The cursor
-                        // is still over the card, so it stays open until the
-                        // mouse leaves and then settles into the line.
-                        const bool minimize = !g_islandMinimized.load();
-                        g_islandMinimized = minimize;
-                        Wh_SetIntValue(L"IslandMinimized", minimize ? 1 : 0);
-                        g_layoutDirty = true;
+                        // Minimize toggle, also local to the island.
+                        ToggleIslandMinimized();
                         return 0;
                     }
                     if (cmd == 5 || cmd == 6) {
@@ -16349,7 +16647,10 @@ DWORD WINAPI RenderThreadProc(void*) {
                                activityTabShown;
         if (timerShown && snapshot.timer.running) {
             shownSecond = static_cast<int>(std::ceil(snapshot.timer.endsAt - now));
-        } else if (primary.kind == IslandKind::Idle && g_settings.showSeconds && !isHidden) {
+        } else if (primary.kind == IslandKind::Idle && !isHidden &&
+                   (g_settings.showSeconds ||
+                    // The Time tab (always the idle card's first) has a second hand.
+                    ((isHoverExpanded || pinned) && NormalizedTabIndex(g_settings) == 0))) {
             SYSTEMTIME st = {};
             GetLocalTime(&st);
             shownSecond = st.wSecond;

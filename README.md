@@ -11,7 +11,7 @@ A [Windhawk](https://windhawk.net) mod that adds an iPhone-style **Dynamic Islan
 This is a fork of [devcode90/Dynamic-Island-for-Windows](https://github.com/devcode90/Dynamic-Island-for-Windows) by Himanshu. It adds synced lyrics, a minimize mode, inline alerts, instant volume/brightness pills that replace the Windows OSD, player switching, a redesigned Date & Weather tab, a simpler Hardware tab, and many fixes.
 
 - **Mod id:** `dynamic-island-for-windows-fork`
-- **Version:** 1.7.12
+- **Version:** 1.7.13
 - **License:** [MIT](LICENSE)
 - **Technical reference:** [DOCUMENTATION.md](DOCUMENTATION.md) explains how each feature should behave, where its code lives, and which Windows APIs it uses. Use it when something breaks after a Windows update.
 
@@ -55,7 +55,7 @@ Depending on what's happening, the pill turns into:
 - **Better waveform.** The waveform follows perceived loudness across 6 frequency bands and how "full" the music is, so quiet songs still move but stay smaller than loud ones. It radiates from the center outward.
 
 ### Minimize mode
-- A button left of **Previous** turns the island into a thin 160×8 glass line 3px from the screen edge, with a faint live waveform and privacy dots.
+- A button left of **Previous** turns the island into a thin 160×8 glass line 3px from the screen edge, with a faint live waveform and privacy dots. Without music, the same button sits in the top-right corner of the Time tab (the card you get when hovering the idle island).
 - Hovering the line opens the full card instantly; moving away tucks it back. Alerts still pop out briefly.
 - The choice is remembered across restarts.
 
@@ -75,6 +75,7 @@ Depending on what's happening, the pill turns into:
 - Works with Chromium browsers, Firefox, Zen, VLC, and UWP apps, including paused video.
 
 ### Dashboards
+- **Redesigned clock.** The Time tab (first tab when you hover the idle island) is now an analog clock card with a ticking accent second hand, next to a greeting for the time of day over a large digital time (AM/PM smaller and muted) and this week's dates with today circled in the accent. The weekday on the Date & Weather tab is easier to read. The collapsed idle strip uses the same accent vector weather icons instead of emoji.
 - **Date & Weather tab.** The calendar and weather tabs are merged: a large date on the left, and city, weather icon, temperature, description, and wind / feels-like / humidity chips on the right. Hover a chip for a short explanation (12 languages). Falls back to the monthly calendar when Weather is off.
 - **Weather follows your location.** Optionally uses Windows location (`WeatherUseLocation`), then the configured city, then IP. Falls back to **Open-Meteo** when wttr.in is down.
 - **Simpler Hardware tab.** Four cards in a 2×2 grid: CPU with its current clock (GHz), RAM with used/total GB, GPU with its temperature (where the GPU reports one), and DISK with an arrow to switch between fixed drives (remembered across restarts). Network cards were removed, and the extra readings are only collected while the tab is visible.

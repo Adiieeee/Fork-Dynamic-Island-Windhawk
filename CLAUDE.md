@@ -29,7 +29,7 @@ There is no build system, test suite, linter, or package manager. The project is
   "/c/Program Files/Windhawk/Compiler/bin/clang++.exe" -fsyntax-only -Wall -std=c++23 \
     -target x86_64-w64-mingw32 -DWH_MOD -DUNICODE -D_UNICODE \
     -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
-    '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.12"' \
+    '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.13"' \
     -include windhawk_api.h -x c++ mod.wh.cpp
   ```
 

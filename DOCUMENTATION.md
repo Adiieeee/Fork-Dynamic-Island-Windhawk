@@ -54,7 +54,7 @@ Complete functional reference for `mod.wh.cpp`. Purpose: if the mod ever breaks 
 "/c/Program Files/Windhawk/Compiler/bin/clang++.exe" -fsyntax-only -Wall -std=c++23 \
   -target x86_64-w64-mingw32 -DWH_MOD -DUNICODE -D_UNICODE \
   -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
-  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.12"' \
+  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.13"' \
   -include windhawk_api.h -x c++ mod.wh.cpp
 ```
 
@@ -308,6 +308,7 @@ Drawing and mouse hit-testing use **the same constants** in the namespaces `Medi
 
 **Expected behavior:**
 - The button to the left of Previous enables minimize mode (stored in `Wh_SetIntValue("IslandMinimized")`).
+- **Without music (since 1.7.13)** the same toggle is drawn in the top-right corner of the idle card's Time tab, on the greeting's line (`TimeLayout::MinimizeButtonX` / `kMinimizeButtonY`, shared by `DrawTimeDashboard` and `IdleMinimizeButtonHitTest`). It reuses command 4, `g_hoveredMediaButton` / `g_pressedMediaButton` and `ToggleIslandMinimized`; the wndproc only accepts it while `IdleTimeTabShown()` (no music pill, Idle chosen, tab 0). Minimize mode itself and the fullscreen-video line never depended on the pill kind, so the idle island already rests as the line (static dots instead of a waveform) and hover opens the idle card.
 - In minimize mode the island becomes a **160×8 glass-style line** sitting **3px from the top edge of the screen** (or the bottom edge for the Bottom position). The line shows a thin accent-colored waveform radiating from the center with fading ends, or static dots while paused. Privacy dots appear at the right end.
   - The line's waveform uses the same `g_state.waveform` ring buffer as the pill/card, so its height follows the analyzer in §4 (frequency-weighted loudness, density, auto-gain max +8 dB). Audio is still captured because the pill kind is still Media.
   - The line shows the **entire buffer** from center to edge. Since 1.7.9 one sample ≈ 10 ms, so center to edge ≈ 480 ms (previously ≈ 64 ms), and the pulse spreads more slowly than on the pill (~120 ms). Edge bars fade via transparency (`edgeFade`); their height is not reduced.
@@ -329,7 +330,7 @@ Drawing and mouse hit-testing use **the same constants** in the namespaces `Medi
 | Render loop: `edgeSpring` | 14266 | critically damped spring, sets `g_layoutDirty` while moving |
 | `Renderer::Render` | 7687 | draws the line (`DrawMinimizedLine`) when `minimizedLine_` is active or height < 24 in minimize mode |
 | `DrawMinimizedLine` | 11575 | pill fill alpha 0.5, white gradient sheen 0.16→0, 1.6px waveform bars, newest sample in the center, sample age = distance from center × whole buffer (48 slots ≈ 480 ms) |
-| `WM_LBUTTONUP` cmd 4 | 13481 | toggle and persist |
+| `WM_LBUTTONUP` cmd 4 | 13481 | toggle and persist (`ToggleIslandMinimized`, shared with the idle Time tab button) |
 | `expanded` on click | `WM_LBUTTONUP` | minimize and the fullscreen-video line count as expanded so the first click isn't "eaten" |
 
 ---
@@ -428,7 +429,7 @@ Full cards per kind (used when **no music is playing**): `DrawClipboard` (±1168
 While expanded (hover or pin), tabs are switched with the mouse wheel or a horizontal swipe (> 40px within < 500ms). Vertical pagination dots are on the right.
 
 **Tab order** (must match `ActiveTabCount` ±1420, and the two `activeTabs` lists in `DrawIdleDashboard` ±10212 and `DrawMedia` ±10641):
-1. Main: Media (if music is playing) or Clock (`DrawTimeDashboard`)
+1. Main: Media (if music is playing) or Time (`DrawTimeDashboard`). Since 1.7.13 the Time tab matches the other cards: a square `DrawCard` on the left (geometry in `TimeLayout`: `left+28`, band `top+30 … bottom−30`, so a 124px square; wider insets than other tabs on purpose, to leave empty space) holding an analog clock (12 hour marks, hour/minute hands in the text colour, accent second hand and centre pin; `ClockAccentGlow` adds an accent radial glow inside the card), and a column on the right (`card.right+26 … right−30`) with an accent greeting for the time of day (`boldTextFormat_`; "Good morning" 05–11, "Good afternoon" 12–17, "Good evening" otherwise, 12 languages via `Loc`), then the digital clock at `timeDashboardFormat_` × `kClockScale` 1.2 (≈67px, shrunk to fit the column; AM/PM at 40% size and muted via `StyleClockDayPeriod`) over a 34px week strip drawn as plain text like the calendar grid (Sunday first, initials from `LOCALE_SSHORTESTDAYNAME*`, today's initial in the accent and its date on an accent disc). The date is not repeated here (it lives on the Date & Weather tab); only `DateFirst` brings it back, in the greeting's place. While the mic/camera is in use, a privacy chip replaces the week strip. The render loop repaints once a second while this tab is open so the second hand ticks.
 2. **Date & Weather** (since 1.7.0, replacing the separate Calendar and Weather tabs): `DrawDateWeatherDashboard` (±9605).
    - **Left:** date hero from `DrawCalendarHero` (±9130), containing the month (accent), year, large day number (`calDayLargeFormat_` 63px), and weekday name. This helper is also used by the calendar tab. The `heroWidth` parameter is 93 on the calendar tab and 112 on this tab (since 1.7.3), because there is no month grid here.
    - **Card corners** use `InsetCardRadius` (±9121): the island radius (`ContentIslandRadius`) minus 16px, clamped to 6–30. Result: 28 for pill, 6 for notch and W11. This keeps card corners concentric with the island so they don't look boxy. Text inside the hero is shifted a few px away from the corner.
@@ -470,7 +471,7 @@ While expanded (hover or pin), tabs are switched with the mouse wheel or a horiz
 
 ## 11. Feature: Idle strip, Privacy, Timer
 
-- **Idle strip** (no music and no notifications): clock and weather. Width is measured from the text via `MeasureIdleStrip` (±7860) and drawn by `DrawIdleDashboard` (±9924). Settings: `ClockFormat`, `ShowSeconds`, `DateFormat`, `DateFirst`.
+- **Idle strip** (no music and no notifications): clock and weather. Width is measured from the text via `MeasureIdleStrip` (±7860) and drawn by `DrawIdleDashboard` (±9924). Since 1.7.13 the weather slot is the accent vector icon from `DrawWeatherIcon` (`IdleStripLayout::WeatherIconSize`, 18px × Text size) + temperature instead of a colour emoji, and the clock's AM/PM marker is muted (`StyleClockDayPeriod`, same size so the measured width holds). Settings: `ClockFormat`, `ShowSeconds`, `DateFormat`, `DateFirst`.
 - **Privacy:**
   - `UpdatePrivacyIndicators` (±6607) and `IsDeviceActiveViaRegistry` (±6527) read the registry `HKCU`/`HKLM\...\CapabilityAccessManager\ConsentStore\{microphone|webcam}`: an app currently using the device has `LastUsedTimeStop = 0`.
   - Orange dot for the microphone and green for the camera, drawn by `DrawPrivacyDots` (±8597), or at the end of the minimize line.
@@ -619,6 +620,7 @@ Use this table to map symptoms to code areas. Every feature above is **target be
 | 1.4.0 | **LRCLIB lyrics** in the collapsed pill (+ toggle, cache, retry); incremental cover reading; **iTunes backup cover**; binary-safe `HttpGet` + timeouts; dynamic pill width following lyrics (0.35-second lead, gaps ≥ 4 seconds return to normal); **Lyrics delay (ms)** setting |
 | 1.5.0 | **Minimize**: glass line + waveform, sits 3px from the screen edge, small hitbox with no delay, hover opens the card |
 | 1.6.0 | **Inline notifications** in the middle of the music pill (no second pill, width follows the notification, max 460); **Activity tab** for Timer/Progress; transient notification duration capped at 3 seconds |
+| 1.7.13 | **Redesigned idle clock**: Time tab rebuilt from the shared card parts (analog clock card with ticking accent second hand, accent greeting over a large digital clock with muted AM/PM, plain-text week strip with today on an accent disc, no duplicate date unless `DateFirst`; **minimize button on the Time tab** so minimize mode can be switched without music; privacy chip replaces the strip while mic/camera is in use); collapsed idle strip uses the accent vector weather icon instead of an emoji and mutes AM/PM; weekday name on the date hero (Date & Weather and Calendar tabs) in the text colour instead of grey |
 | 1.7.11 | **Lyrics no longer go missing when LRCLIB is busy**: `HttpGet` returns the HTTP status; LRCLIB lookups only accept 200/404, retry 503/429 once after 1.5 seconds, and uncertain empty results aren't cached (retry 2/2/2/5/10 seconds then every 20 seconds; while paused only retries n and n+1 still run, the rest wait for playback to resume); per-track log with each request's status |
 | 1.7.10 | **Balanced waveform**: `WaveformAnalyzer` with 6 band-pass filters (frequency-weighted loudness + density of active bands as an estimate of instrument count); auto-gain capped at +8 dB, absolute −60…−10 dBFS scale with a 1.3 curve, so soft music moves but stays small; `DrawWaveform` now radiates from the center to the left and right like the minimize line |
 | 1.7.9 | **More accurate waveform for soft music**: dB scale with auto-gain (`g_waveformRefDb`, 30 dB window, reference floor −45 dB, −70 dB gate) replacing linear `RMS × 4`; one sample per ~10 ms so release and bar spacing match real time; no more false zeros between packets |
