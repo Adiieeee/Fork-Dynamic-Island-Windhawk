@@ -11,7 +11,7 @@ A [Windhawk](https://windhawk.net) mod that adds an iPhone-style **Dynamic Islan
 This is a fork of [devcode90/Dynamic-Island-for-Windows](https://github.com/devcode90/Dynamic-Island-for-Windows) by Himanshu. It adds synced lyrics, a minimize mode, inline alerts, instant volume/brightness pills that replace the Windows OSD, player switching, a redesigned Date & Weather tab, a simpler Hardware tab, and many fixes.
 
 - **Mod id:** `dynamic-island-for-windows-fork`
-- **Version:** 1.7.14
+- **Version:** 1.7.15
 - **License:** [MIT](LICENSE)
 - **Technical reference:** [DOCUMENTATION.md](DOCUMENTATION.md) explains how each feature should behave, where its code lives, and which Windows APIs it uses. Use it when something breaks after a Windows update.
 

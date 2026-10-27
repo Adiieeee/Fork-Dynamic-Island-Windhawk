@@ -54,7 +54,7 @@ Complete functional reference for `mod.wh.cpp`. Purpose: if the mod ever breaks 
 "/c/Program Files/Windhawk/Compiler/bin/clang++.exe" -fsyntax-only -Wall -std=c++23 \
   -target x86_64-w64-mingw32 -DWH_MOD -DUNICODE -D_UNICODE \
   -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
-  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.14"' \
+  '-DWH_MOD_ID=L"dynamic-island-for-windows-fork"' '-DWH_MOD_VERSION=L"1.7.15"' \
   -include windhawk_api.h -x c++ mod.wh.cpp
 ```
 
@@ -392,12 +392,12 @@ Full cards per kind (used when **no music is playing**): `DrawClipboard` (±1168
 **How it works:**
 1. **Event-based detection:**
    - `VolumeChangeCallback` (±6259, `IAudioEndpointVolumeCallback::OnNotify`) receives `fMasterVolume` and `bMuted` from Windows for every change (keys, slider, apps), then calls `ReportVolumeChange` (±6238), which fills `g_state.volume` and `system.volumePercent`, then `TriggerNudge`.
-   - `DefaultDeviceWatcher` (±6305, `IMMNotificationClient`) re-registers the callback when the default output device changes.
+   - `DefaultDeviceWatcher` (±6305, `IMMNotificationClient`) re-registers the callback when the default output device changes, and bumps `g_defaultRenderDeviceGeneration` so every cached endpoint is re-fetched (since 1.7.15).
    - Both are run by `VolumeWatcherThreadProc` (±6344).
-2. **`UpdateSystemSnapshot`** (±6124) only reads the level for the dashboard and **does not trigger notifications**. It used to, which was the source of a 0–1 second delay.
+2. **`UpdateSystemSnapshot`** (±6124) only reads the level for the dashboard and **does not trigger notifications**. It used to, which was the source of a 0–1 second delay. Its cached endpoint is dropped when `g_defaultRenderDeviceGeneration` changes, so the dashboard shows the level of the device that is actually playing.
 3. **Suppressing the OSD:** the Windows OSD appears because the shell handles the volume keys, not because the volume changes.
    - `LowLevelKeyboardProc` (±12785) swallows `VK_VOLUME_UP`/`VK_VOLUME_DOWN`/`VK_VOLUME_MUTE` (`return 1`), including synthetic keys (`LLKHF_INJECTED`, e.g. from OEM software for Fn + F), then posts `WM_APP_VOLUME_KEY` on key-down (including auto-repeat).
-   - `ApplyVolumeKey` (±6412) runs `VolumeStepUp`/`VolumeStepDown`/`SetMute` on the window thread, with a cached endpoint and one retry.
+   - `ApplyVolumeKey` (±6412) runs `VolumeStepUp`/`VolumeStepDown`/`SetMute` on the window thread, with a cached endpoint and one retry. Since 1.7.15 the cache is also dropped whenever `g_defaultRenderDeviceGeneration` changes. A speaker that stops being the default stays a valid endpoint, so the retry (which only fires on a failed call) never noticed a switch to Bluetooth/headphones, and the keys kept stepping the old speaker.
    - `KeyboardHookWanted` (±12821) installs the hook if `capsLock || volume`.
    - `LoadSettings` calls `NotifyKeyboardThreadSettingChanged` when either changes.
 4. **Diagnostic log:** `Volume key: vk=0x.. injected=..` (at most 1 per 2 seconds per combination), to confirm that Fn + F or a keyboard knob is being caught.
@@ -598,6 +598,7 @@ Use this table to map symptoms to code areas. Every feature above is **target be
 | Windows brightness OSD still appears | `BrightnessOsdShown`, `LooksLikeShellOsd` (check the `Brightness: hid ...` log); at 0%/100% check the `learned brightness key` log | `SetWinEventHook`, WMI `WmiMonitorBrightnessEvent` |
 | Windows volume OSD appears again | `LowLevelKeyboardProc`, `KeyboardHookWanted`, `ApplyVolumeKey` (check the `Volume key:` log) | `WH_KEYBOARD_LL`, `VK_VOLUME_*` |
 | Volume keys dead entirely | the hook swallows the key but `ApplyVolumeKey` fails: check the endpoint in `ApplyVolumeKey` | Core Audio |
+| Volume keys change the wrong device after switching output (e.g. Bluetooth); the pill moves but the sound doesn't | `ApplyVolumeKey` / `UpdateSystemSnapshot` endpoint caches, `g_defaultRenderDeviceGeneration` bumped in `DefaultDeviceWatcher::OnDefaultDeviceChanged` | `IMMNotificationClient`, `IAudioEndpointVolume` |
 | Clipboard doesn't appear | `WM_CLIPBOARDUPDATE`, `CaptureClipboard` | `AddClipboardFormatListener` |
 | Blur/acrylic missing or boxy | `Backdrop` namespace, `ApplyBackdropRegion` | `SetWindowCompositionAttribute` (**undocumented**) |
 | Island covered by other windows | `EnsureTopmost`, `PositionOverlayWindow` | `HWND_TOPMOST` z-order |
@@ -626,6 +627,7 @@ Use this table to map symptoms to code areas. Every feature above is **target be
 | 1.5.0 | **Minimize**: glass line + waveform, sits 3px from the screen edge, small hitbox with no delay, hover opens the card |
 | 1.6.0 | **Inline notifications** in the middle of the music pill (no second pill, width follows the notification, max 460); **Activity tab** for Timer/Progress; transient notification duration capped at 3 seconds |
 | 1.7.14 | **Track peek**: for 4.5 s after every track change (lyrics or not) the collapsed media pill widens and shows the title over the artist (`TrackPeekActive`, `DrawTrackPeek`), then the lyrics fade in. **Tracks without lyrics** show accent beamed eighth notes in the middle of the pill: LRCLIB's `instrumental` flag is now read (new `Instrumental` lyrics status, `FirstJsonBoolFieldTrue`), and a finished lookup with no synced lyrics gets the same note (`LyricsShowInstrumentalNote`); the note is drawn as vectors with a single beam (`DrawBeamedEighthNotes`), sized from the ink of the U+266B glyph |
+| 1.7.15 | **Volume keys follow the active output**: after the default output changed (e.g. connecting Bluetooth headphones), Fn + F volume keys and the volume pill kept controlling the old speaker, because `ApplyVolumeKey` cached an endpoint that stays valid and only re-fetched it on a failed call. `DefaultDeviceWatcher` now bumps `g_defaultRenderDeviceGeneration`, and `ApplyVolumeKey` and the dashboard volume read in `UpdateSystemSnapshot` re-fetch their endpoint whenever it changes |
 | 1.7.13 | **Redesigned idle clock**: Time tab rebuilt from the shared card parts (analog clock card with ticking accent second hand, accent greeting over a large digital clock with muted AM/PM, plain-text week strip with today on an accent disc, no duplicate date unless `DateFirst`; **minimize button on the Time tab** so minimize mode can be switched without music; privacy chip replaces the strip while mic/camera is in use); collapsed idle strip uses the accent vector weather icon instead of an emoji and mutes AM/PM; weekday name on the date hero (Date & Weather and Calendar tabs) in the text colour instead of grey |
 | 1.7.11 | **Lyrics no longer go missing when LRCLIB is busy**: `HttpGet` returns the HTTP status; LRCLIB lookups only accept 200/404, retry 503/429 once after 1.5 seconds, and uncertain empty results aren't cached (retry 2/2/2/5/10 seconds then every 20 seconds; while paused only retries n and n+1 still run, the rest wait for playback to resume); per-track log with each request's status |
 | 1.7.10 | **Balanced waveform**: `WaveformAnalyzer` with 6 band-pass filters (frequency-weighted loudness + density of active bands as an estimate of instrument count); auto-gain capped at +8 dB, absolute −60…−10 dBFS scale with a 1.3 curve, so soft music moves but stays small; `DrawWaveform` now radiates from the center to the left and right like the minimize line |

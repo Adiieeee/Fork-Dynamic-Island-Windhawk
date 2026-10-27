@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows-fork
 // @name            Dynamic Island for Windows - Fork
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.7.14
+// @version         1.7.15
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -7491,6 +7491,13 @@ void CycleHardwareDisk() {
     g_layoutDirty = true;
 }
 
+// Bumped by DefaultDeviceWatcher whenever the default output changes, so code
+// that caches an endpoint (ApplyVolumeKey, UpdateSystemSnapshot) re-fetches it
+// instead of steering the old device. A speaker that stops being the default
+// is still a valid endpoint, so calls on it keep succeeding and a
+// retry-on-failure alone never notices the switch.
+std::atomic<unsigned> g_defaultRenderDeviceGeneration{0};
+
 void UpdateSystemSnapshot(bool includeGpuStats, bool includeNetStats, bool includeHwDetails) {
     SystemSnapshot next;
     {
@@ -7567,6 +7574,12 @@ void UpdateSystemSnapshot(bool includeGpuStats, bool includeNetStats, bool inclu
     }
 
     static ComPtr<IAudioEndpointVolume> s_volume;
+    static unsigned s_volumeGeneration = 0;
+    const unsigned volumeGeneration = g_defaultRenderDeviceGeneration.load();
+    if (volumeGeneration != s_volumeGeneration) {
+        s_volumeGeneration = volumeGeneration;
+        s_volume.Reset();
+    }
     if (!s_volume) {
         ComPtr<IMMDeviceEnumerator> enumerator;
         ComPtr<IMMDevice> device;
@@ -7695,6 +7708,7 @@ class DefaultDeviceWatcher final : public IMMNotificationClient {
 
     STDMETHODIMP OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR) override {
         if (flow == eRender && role == eConsole) {
+            g_defaultRenderDeviceGeneration.fetch_add(1);
             SetEvent(changedEvent_);
         }
         return S_OK;
@@ -7781,6 +7795,12 @@ DWORD WINAPI VolumeWatcherThreadProc(void*) {
 // back through VolumeChangeCallback and raises the island's own pill.
 void ApplyVolumeKey(UINT vk) {
     static ComPtr<IAudioEndpointVolume> s_endpoint;
+    static unsigned s_generation = 0;
+    const unsigned generation = g_defaultRenderDeviceGeneration.load();
+    if (generation != s_generation) {
+        s_generation = generation;
+        s_endpoint.Reset();
+    }
     for (int attempt = 0; attempt < 2; ++attempt) {
         if (!s_endpoint) {
             ComPtr<IMMDeviceEnumerator> enumerator;
@@ -7818,8 +7838,9 @@ void ApplyVolumeKey(UINT vk) {
             }
             return;
         }
-        // The cached endpoint goes stale when the default device changes or is
-        // unplugged; fetch the current one and try once more.
+        // A switched default is caught by the generation check above; this
+        // covers the cached device being unplugged or disabled. Fetch the
+        // current one and try once more.
         s_endpoint.Reset();
     }
 }
